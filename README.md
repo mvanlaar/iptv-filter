@@ -22,7 +22,7 @@ Run the container: `docker-compose up`
 
 ## Python
 
-### Linux 
+### Linux  
 
 #### Initialization
 
