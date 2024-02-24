@@ -1,9 +1,7 @@
 <!DOCTYPE html>
 <html>
-<head>
-  <script src="https://unpkg.com/ag-grid-community/dist/ag-grid-community.min.noStyle.js"></script>
-  <link rel="stylesheet" href="https://unpkg.com/ag-grid-community/dist/styles/ag-grid.css">
-  <link rel="stylesheet" href="https://unpkg.com/ag-grid-community/dist/styles/ag-theme-alpine.css">
+<head>  
+  <script src="https://cdn.jsdelivr.net/npm/ag-grid-community/dist/ag-grid-community.min.js"></script>  
   <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
 </head>
 <body>
@@ -11,7 +9,7 @@
   <div>To select by group, click <a href="/configure">here.</a>
   </div><br/>
 
-  <div id="myGrid" style="height: 600px;" class="ag-theme-alpine"></div>
+  <div id="myGrid" style="height: 600px;" class="ag-theme-quartz"></div>
 
   <script type="text/javascript" charset="utf-8">
 	function getCookie(name) {
@@ -62,10 +60,10 @@
     };
 
   // lookup the container we want the Grid to use
-  var eGridDiv = document.querySelector('#myGrid');
-
+  const myGridElement = document.querySelector('#myGrid');
+  agGrid.createGrid(myGridElement, gridOptions);
   // create the grid passing in the div to use together with the columns &amp; data we want to use
-  new agGrid.Grid(eGridDiv, gridOptions);
+  //new agGrid.Grid(eGridDiv, gridOptions);
 
 	function autoSizeAll(skipHeader) {
 		var allColumnIds = [];
