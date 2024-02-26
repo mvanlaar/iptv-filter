@@ -1,94 +1,110 @@
 <!DOCTYPE html>
 <html>
-<head>  
-  <script src="https://cdn.jsdelivr.net/npm/ag-grid-community/dist/ag-grid-community.min.js"></script>  
-  <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+
+<head>
+    <script src="https://cdn.jsdelivr.net/npm/ag-grid-community/dist/ag-grid-community.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
 </head>
+
 <body>
-  <h1>Select channels</h1>
-  <div>To select by group, click <a href="/configure">here.</a>
-  </div><br/>
+    <h1>Select channels</h1>
+    <div>To select by group, click <a href="/configure">here.</a>
+    </div><br />
 
-  <div id="myGrid" style="height: 600px;" class="ag-theme-quartz"></div>
+    <div id="myGrid" style="height: 600px;" class="ag-theme-quartz"></div>
 
-  <script type="text/javascript" charset="utf-8">
-	function getCookie(name) {
-	    let cookieValue = null;
-	    if (document.cookie && document.cookie !== '') {
-	        const cookies = document.cookie.split(';');
-	        for (let i = 0; i < cookies.length; i++) {
-	            const cookie = cookies[i].trim();
-	            // Does this cookie string begin with the name we want?
-	            if (cookie.substring(0, name.length + 1) === (name + '=')) {
-	                cookieValue = decodeURIComponent(cookie.substring(name.length + 1));
-	                break;
-	            }
-	        }
-	    }
-	    return cookieValue;
-	}
-	// const csrftoken = getCookie('csrftoken');
+    <script type="text/javascript" charset="utf-8">
 
-  	function updateChannel(channel) {
-      axios
-      .post(`/channels/${channel.pk}`, {
-      	'included': channel.included
-      }, {
-      	'headers' : {'X-CSRFToken':getCookie('csrftoken')}
-      })
-            .catch(err => {
-      	console.log(err.code)
-      	console.log(err.message)
-      	console.log(err.stack)
-      })
-  	}
+        let GridApi;
 
-    // specify the columns
-    var columnDefs = [
-      { field: "included", sortable: true, filter: true, checkboxSelection: true },
-      { field: "new", sortable: true, filter: true },
-      { field: "group_title", sortable: true, filter: true },
-      { field: "tvg_id", sortable: true, filter: true },
-      { field: "tvg_name", sortable: true, filter: true }
-    ];
 
-    // let the grid know which columns to use
-    var gridOptions = {
-      columnDefs: columnDefs,
-      rowSelection:'multiple',
-      suppressRowClickSelection:true
-    };
+        function getCookie(name) {
+            let cookieValue = null;
+            if (document.cookie && document.cookie !== '') {
+                const cookies = document.cookie.split(';');
+                for (let i = 0; i < cookies.length; i++) {
+                    const cookie = cookies[i].trim();
+                    // Does this cookie string begin with the name we want?
+                    if (cookie.substring(0, name.length + 1) === (name + '=')) {
+                        cookieValue = decodeURIComponent(cookie.substring(name.length + 1));
+                        break;
+                    }
+                }
+            }
+            return cookieValue;
+        }
+        // const csrftoken = getCookie('csrftoken');
 
-  // lookup the container we want the Grid to use
-  const myGridElement = document.querySelector('#myGrid');
-  agGrid.createGrid(myGridElement, gridOptions);
-  // create the grid passing in the div to use together with the columns &amp; data we want to use
-  //new agGrid.Grid(eGridDiv, gridOptions);
+        function updateChannel(channel) {
+            axios
+                .post(`/channels/${channel.pk}`, {
+                    'included': channel.included
+                }, {
+                    'headers': { 'X-CSRFToken': getCookie('csrftoken') }
+                })
+                .catch(err => {
+                    console.log(err.code)
+                    console.log(err.message)
+                    console.log(err.stack)
+                })
+        }
 
-	function autoSizeAll(skipHeader) {
-		var allColumnIds = [];
-		gridOptions.columnApi.getAllColumns().forEach(function (column) {
-			allColumnIds.push(column.colId);
-		});
+        // specify the columns
+        var columnDefs = [
+            { field: "included", sortable: true, filter: true, checkboxSelection: true },
+            { field: "new", sortable: true, filter: true },
+            { field: "group_title", sortable: true, filter: true },
+            { field: "tvg_id", sortable: true, filter: true },
+            { field: "tvg_name", sortable: true, filter: true }
+        ];
 
-		gridOptions.columnApi.autoSizeColumns(allColumnIds, skipHeader);
-	}
+        // let the grid know which columns to use
+        var gridOptions = {
+            columnDefs: columnDefs,
+            rowSelection: 'multiple',
+            suppressRowClickSelection: true
+        };
 
-  agGrid.simpleHttpRequest({url: '/channels'}).then(function(data) {
-      gridOptions.api.setRowData(data);
-	  // "initiallySet" is to avoid an onRowSelected happening when the page is first constructed and this initial forEachNode runs.
-      gridOptions.api.forEachNode(node=> {if( node.data.included) { node.data.initiallySet = true;node.setSelected(true)}})
-	  autoSizeAll()
+        function autoSizeAll(skipHeader) {
+            var allColumnIds = [];
+            gridOptions.columnApi.getAllColumns().forEach(function (column) {
+                allColumnIds.push(column.colId);
+            });
 
-      gridOptions.onRowSelected = (event) => {
-      	if( event.data.initiallySet ) 
-      		{ delete event.data.initiallySet} 
-      	else {
-      		event.data.included = event.node.selected; updateChannel(event.data)
-      	}
-      }
-  });
+            gridOptions.columnApi.autoSizeColumns(allColumnIds, skipHeader);
+        }
 
-  </script>
+        function setData(rowData) {
+            GridApi.setGridOption('rowData', rowData);            
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            // lookup the container we want the Grid to use
+            const myGridElement = document.querySelector('#myGrid');
+            GridApi = agGrid.createGrid(myGridElement, gridOptions);
+            
+            fetch('/channels')
+                .then(response => response.json())
+                .then(data => setData(data));
+        });
+
+        /*
+        agGrid.simpleHttpRequest({ url: '/channels' }).then(function (data) {
+            gridOptions.api.setRowData(data);
+            // "initiallySet" is to avoid an onRowSelected happening when the page is first constructed and this initial forEachNode runs.
+            gridOptions.api.forEachNode(node => { if (node.data.included) { node.data.initiallySet = true; node.setSelected(true) } })
+            autoSizeAll()
+
+            gridOptions.onRowSelected = (event) => {
+                if (event.data.initiallySet) { delete event.data.initiallySet }
+                else {
+                    event.data.included = event.node.selected; updateChannel(event.data)
+                }
+            }
+        });
+        */
+
+    </script>
 </body>
+
 </html>
