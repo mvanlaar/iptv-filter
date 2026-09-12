@@ -83,6 +83,7 @@ def _update_tables(filetype):
 
         start_perftime = time.perf_counter()
         new_channels = []
+        pc = None  # Reset so a stray/duplicate URL line can't reuse a stale channel from a previous iteration.
         for line in file.splitlines():
             m = infopattern.findall(line)
             if len(m) > 0:
@@ -101,11 +102,12 @@ def _update_tables(filetype):
                 # save after we parse the URL on the next line.
 
             else:
-                if urlpattern.match(line):
+                if urlpattern.match(line) and pc is not None:
                     # This is the URL line.
                     pc.stream_url = line
                     # pc.output_representation = _map_m3u_channel(pc)
                     new_channels.append(pc)
+                    pc = None  # Consumed; don't let a duplicate/extra URL line re-add this channel.
         PlaylistChannel.objects.bulk_create(new_channels)
         logging.info(f"Done with Channels in {time.perf_counter()-start_perftime} seconds.")
 
@@ -123,13 +125,18 @@ def _update_tables(filetype):
             if not ch_id or len(ch_id) == 0:
                 continue
 
+            # Reset per-channel so a channel missing one of these elements
+            # doesn't silently inherit the previous channel's value.
+            display_name = ch_id
+            icon = None
+
             for child in channel:
                 if child.tag == 'display-name':
-                    display_name = child.text
+                    display_name = child.text or ch_id
                 elif child.tag == 'icon':
                     icon = child.get('src')
 
-            new_channels.append(EpgChannel(channel_id=channel.get('id'), display_name= display_name, icon=icon, included=channel.get('id') in included_channel_ids, last_updated=now))
+            new_channels.append(EpgChannel(channel_id=ch_id, display_name=display_name, icon=icon, included=ch_id in included_channel_ids, last_updated=now))
         EpgChannel.objects.bulk_create(new_channels)
         logging.info(f"Done with EPG Channels in {time.perf_counter()-start_perftime} seconds.")
 
@@ -145,14 +152,16 @@ def _update_tables(filetype):
             start = programme.get('start')
             stop = programme.get('stop')
 
+            # Reset per-programme so a programme missing one of these
+            # elements doesn't silently inherit the previous one's value.
+            title = ''
+            desc = ''
+
             for child in programme:
                 if child.tag == 'title':
                     title = child.text or ''
                 elif child.tag == 'desc':
                     desc = child.text or ''
-
-            if not desc:
-                desc = ''
 
             new_programmes.append(EpgProgramme(channel=ch_id, start=start, stop=stop, title=title, desc=desc, included=ch_id in included_channel_ids, last_updated=now))
         EpgProgramme.objects.bulk_create(new_programmes)
