@@ -1,12 +1,214 @@
+<!DOCTYPE html>
 <html>
-<h1>Select IPTV groups to include</h1>
-<form action="/configure" method="post">
-{% csrf_token %}
-{% for tuple in group_includes %}
-<!-- {{tuple}}<br/> -->
-<input type='checkbox' id='{{tuple.group_title}}' name='{{tuple.group_title}}' value='{{tuple.group_title}}' {% if tuple.included == True %}checked{% endif %}/>
-<label for='{{tuple.group_title}}'>{{tuple.label}}</label><br/>
-{% endfor %}
-<input type='submit' value='Update Included Groups'/>
-</form>
+
+<head>
+    <meta charset="utf-8">
+    <title>Select IPTV groups</title>
+    <style>
+        :root {
+            color-scheme: light dark;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            max-width: 720px;
+            margin: 2rem auto;
+            padding: 0 1rem;
+            line-height: 1.4;
+        }
+
+        h1 {
+            font-size: 1.4rem;
+            margin-bottom: 0.25rem;
+        }
+
+        .subtitle {
+            color: #666;
+            margin-bottom: 1rem;
+        }
+
+        .toolbar {
+            position: sticky;
+            top: 0;
+            background: Canvas;
+            padding: 0.75rem 0;
+            border-bottom: 1px solid #ddd;
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 0.5rem;
+            margin-bottom: 0.5rem;
+        }
+
+        #search {
+            flex: 1 1 200px;
+            padding: 0.4rem 0.6rem;
+            font-size: 1rem;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+
+        .toolbar button {
+            padding: 0.4rem 0.8rem;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            background: ButtonFace;
+            cursor: pointer;
+        }
+
+        .toolbar button:hover {
+            background: #e8e8e8;
+        }
+
+        #count {
+            font-size: 0.9rem;
+            color: #666;
+            white-space: nowrap;
+        }
+
+        .group-list {
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            overflow: hidden;
+        }
+
+        .group-row {
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+            padding: 0.5rem 0.75rem;
+            border-bottom: 1px solid #eee;
+        }
+
+        .group-row:last-child {
+            border-bottom: none;
+        }
+
+        .group-row:hover {
+            background: rgba(127, 127, 127, 0.08);
+        }
+
+        .group-row input[type="checkbox"] {
+            width: 1.1rem;
+            height: 1.1rem;
+            flex-shrink: 0;
+        }
+
+        .group-row label {
+            cursor: pointer;
+            flex: 1;
+        }
+
+        .group-row.hidden {
+            display: none;
+        }
+
+        .no-results {
+            padding: 1rem;
+            color: #666;
+            text-align: center;
+        }
+
+        .submit-row {
+            position: sticky;
+            bottom: 0;
+            background: Canvas;
+            padding: 0.75rem 0;
+            margin-top: 0.5rem;
+            border-top: 1px solid #ddd;
+        }
+
+        input[type="submit"] {
+            padding: 0.6rem 1.2rem;
+            font-size: 1rem;
+            border: none;
+            border-radius: 4px;
+            background: #2563eb;
+            color: white;
+            cursor: pointer;
+        }
+
+        input[type="submit"]:hover {
+            background: #1d4ed8;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>Select IPTV groups to include</h1>
+    <div class="subtitle">
+        Toggle entire groups at once. For per-channel control instead, go <a href="/">here</a>.
+    </div>
+
+    <form action="/configure" method="post">
+        {% csrf_token %}
+
+        <div class="toolbar">
+            <input type="text" id="search" placeholder="Filter groups by name&hellip;" autocomplete="off">
+            <button type="button" id="selectAllBtn">Select visible</button>
+            <button type="button" id="deselectAllBtn">Deselect visible</button>
+            <span id="count"></span>
+        </div>
+
+        <div class="group-list" id="groupList">
+            {% for tuple in group_includes %}
+            <div class="group-row" data-search="{{ tuple.group_title|lower }}">
+                <input type="checkbox" id="{{ tuple.group_title }}" name="{{ tuple.group_title }}"
+                    value="{{ tuple.group_title }}" {% if tuple.included == True %}checked{% endif %}>
+                <label for="{{ tuple.group_title }}">{{ tuple.label }}</label>
+            </div>
+            {% endfor %}
+        </div>
+        <div class="no-results" id="noResults" style="display: none;">No groups match your search.</div>
+
+        <div class="submit-row">
+            <input type="submit" value="Update Included Groups">
+        </div>
+    </form>
+
+    <script>
+        const searchInput = document.getElementById('search');
+        const rows = Array.from(document.querySelectorAll('.group-row'));
+        const noResults = document.getElementById('noResults');
+        const countEl = document.getElementById('count');
+        const totalGroups = rows.length;
+
+        function visibleRows() {
+            return rows.filter(r => !r.classList.contains('hidden'));
+        }
+
+        function updateCount() {
+            const checked = rows.filter(r => r.querySelector('input').checked).length;
+            countEl.textContent = `${checked} of ${totalGroups} groups selected`;
+        }
+
+        function applyFilter() {
+            const term = searchInput.value.trim().toLowerCase();
+            let anyVisible = false;
+            rows.forEach(row => {
+                const match = !term || row.dataset.search.includes(term);
+                row.classList.toggle('hidden', !match);
+                if (match) anyVisible = true;
+            });
+            noResults.style.display = anyVisible ? 'none' : 'block';
+        }
+
+        searchInput.addEventListener('input', applyFilter);
+
+        document.getElementById('selectAllBtn').addEventListener('click', () => {
+            visibleRows().forEach(r => { r.querySelector('input').checked = true; });
+            updateCount();
+        });
+
+        document.getElementById('deselectAllBtn').addEventListener('click', () => {
+            visibleRows().forEach(r => { r.querySelector('input').checked = false; });
+            updateCount();
+        });
+
+        document.getElementById('groupList').addEventListener('change', updateCount);
+
+        updateCount();
+    </script>
+</body>
+
 </html>
