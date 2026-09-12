@@ -164,6 +164,49 @@ def configure(request):
         return HttpResponse(f'Updated channels in {time.perf_counter()-start_perftime} seconds.')
 
 
+def status_api(request):
+    now = timezone.now()
+
+    def file_status(filetype):
+        url_configured = AppConfig.objects.filter(key=f'{filetype}_url').exists()
+        cached = CachedFile.objects.filter(file_type=filetype).values('last_updated').first()
+        last_error = iptv_updater.get_last_error(filetype)
+        return {
+            'url_configured': url_configured,
+            'last_successful_fetch': cached['last_updated'].isoformat() if cached else None,
+            'last_error': {
+                'time': last_error['time'].isoformat(),
+                'message': last_error['message'],
+            } if last_error else None,
+        }
+
+    m3u_status = file_status('m3u')
+    m3u_status['channel_count'] = PlaylistChannel.objects.count()
+    m3u_status['included_channel_count'] = PlaylistChannel.objects.filter(included=True).count()
+
+    epg_status = file_status('epg')
+    epg_status['channel_count'] = EpgChannel.objects.count()
+    epg_status['included_channel_count'] = EpgChannel.objects.filter(included=True).count()
+    epg_status['programme_count'] = EpgProgramme.objects.count()
+    epg_status['included_programme_count'] = EpgProgramme.objects.filter(included=True).count()
+
+    # "healthy" means both sources are configured and have loaded at least
+    # once - it doesn't demand a *recent* fetch, since m3u/epg are only
+    # scheduled to refresh daily/hourly and being between cycles is normal.
+    healthy = (
+        m3u_status['url_configured'] and m3u_status['last_successful_fetch'] is not None and
+        epg_status['url_configured'] and epg_status['last_successful_fetch'] is not None
+    )
+
+    payload = {
+        'healthy': healthy,
+        'server_time': now.isoformat(),
+        'm3u': m3u_status,
+        'epg': epg_status,
+    }
+    return HttpResponse(json.dumps(payload, indent=2), content_type='application/json')
+
+
 # ---------------------------------------------
 # These are to allow forcing an action.
 
