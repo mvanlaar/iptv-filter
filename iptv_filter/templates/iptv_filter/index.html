@@ -58,24 +58,37 @@
             { field: "tvg_name", sortable: true, filter: true }
         ];
 
+        // "initiallySet" distinguishes the programmatic selection we make on
+        // load (to reflect each channel's current server-side 'included'
+        // state) from a genuine user click, so loading the page doesn't
+        // itself trigger a wave of no-op save requests.
+        function onRowSelected(event) {
+            if (event.data.initiallySet) {
+                delete event.data.initiallySet;
+                return;
+            }
+            event.data.included = event.node.isSelected();
+            updateChannel(event.data);
+        }
+
         // let the grid know which columns to use
         var gridOptions = {
             columnDefs: columnDefs,
             rowSelection: 'multiple',
-            suppressRowClickSelection: true
+            suppressRowClickSelection: true,
+            onRowSelected: onRowSelected
         };
 
-        function autoSizeAll(skipHeader) {
-            var allColumnIds = [];
-            gridOptions.columnApi.getAllColumns().forEach(function (column) {
-                allColumnIds.push(column.colId);
-            });
-
-            gridOptions.columnApi.autoSizeColumns(allColumnIds, skipHeader);
-        }
-
         function setData(rowData) {
-            GridApi.setGridOption('rowData', rowData);            
+            GridApi.setGridOption('rowData', rowData);
+            // Reflect each channel's current 'included' state as its initial
+            // checkbox selection.
+            GridApi.forEachNode(node => {
+                if (node.data.included) {
+                    node.data.initiallySet = true;
+                    node.setSelected(true);
+                }
+            });
         }
 
         document.addEventListener('DOMContentLoaded', () => {
@@ -87,22 +100,6 @@
                 .then(response => response.json())
                 .then(data => setData(data));
         });
-
-        /*
-        agGrid.simpleHttpRequest({ url: '/channels' }).then(function (data) {
-            gridOptions.api.setRowData(data);
-            // "initiallySet" is to avoid an onRowSelected happening when the page is first constructed and this initial forEachNode runs.
-            gridOptions.api.forEachNode(node => { if (node.data.included) { node.data.initiallySet = true; node.setSelected(true) } })
-            autoSizeAll()
-
-            gridOptions.onRowSelected = (event) => {
-                if (event.data.initiallySet) { delete event.data.initiallySet }
-                else {
-                    event.data.included = event.node.selected; updateChannel(event.data)
-                }
-            }
-        });
-        */
 
     </script>
 </body>
