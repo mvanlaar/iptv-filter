@@ -1,4 +1,4 @@
-FROM python:3
+FROM python:3.12
 ENV PYTHONUNBUFFERED=1
 WORKDIR /code
 COPY requirements.txt /code/
@@ -7,4 +7,4 @@ COPY . /code/
 RUN IPTV_SAFE_START=1 python3 manage.py migrate
 #RUN chown 1000:1000 db.sqlite3
 RUN chmod +x /code/run.sh
-CMD /code/run.sh
+CMD ["/code/run.sh"]
