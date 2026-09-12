@@ -66,11 +66,13 @@ def channel_api(request, id=-1):
             chs = PlaylistChannel.objects.filter(pk=id)
             if len(chs) == 1:
                 ch = chs[0]
-                changeset = json.loads(request.body)
-                ch.included = changeset['included']
+                try:
+                    changeset = json.loads(request.body)
+                    ch.included = changeset['included']
+                except (json.JSONDecodeError, KeyError) as e:
+                    return HttpResponse(json.dumps({'result': 'error', 'message': f'Invalid request body: {e}'}), status=400, content_type='application/json')
                 ch.save()
 
-        # TODO: Throw+catch exceptions (eg. bad key) and respond appropriately
         # TODO: Error class for consistent json responses?
         return HttpResponse(json.dumps({'result':'success'}))
 
