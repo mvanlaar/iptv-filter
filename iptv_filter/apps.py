@@ -33,8 +33,11 @@ class IptvFilterConfig(AppConfig):
             ac = AppConfigModel(key='epg_url', value=epg_url, last_updated=timezone.now())
             ac.save()
 
-        threading.Thread(target=iptv_updater.update_all).start()
-        threading.Thread(target=iptv_updater.update_m3u_scheduled).start()
-        threading.Thread(target=iptv_updater.update_epg_scheduled).start()
+        # daemon=True so these threads never block the process from exiting
+        # cleanly (e.g. on `docker stop`) - without it, Python won't exit
+        # while a thread with an hours-long sleep() is still alive.
+        threading.Thread(target=iptv_updater.update_all, name='iptv-startup-update', daemon=True).start()
+        threading.Thread(target=iptv_updater.update_m3u_scheduled, name='iptv-m3u-scheduler', daemon=True).start()
+        threading.Thread(target=iptv_updater.update_epg_scheduled, name='iptv-epg-scheduler', daemon=True).start()
 
         return
