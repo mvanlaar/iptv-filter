@@ -68,28 +68,33 @@ def m3u_api(request):
     logger.info("Received m3u API call")
     included_channels = PlaylistChannel.objects.filter(included = True)
 
-    m3u = "#EXTM3U\r\n"
+    parts = ["#EXTM3U\r\n"]
     for c in included_channels:
-        m3u += str(c) + "\r\n"
+        parts.append(str(c))
+        parts.append("\r\n")
+    m3u = "".join(parts)
 
     logger.info("Responded to m3u API call")
     return HttpResponse(m3u)
 
 def epg_api(request):
     logger.info("Received epg API call")
-    epg = """<?xml version="1.0" encoding="utf-8"?>
+    parts = ["""<?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE tv SYSTEM "xmltv.dtd">
 <tv>
-"""
+"""]
     included_channels = EpgChannel.objects.filter(included = True)
     for c in included_channels:
-        epg += str(c).replace('&', '&amp;') + "\r\n"
+        parts.append(str(c).replace('&', '&amp;'))
+        parts.append("\r\n")
 
     included_programmes = EpgProgramme.objects.filter(included = True)
     for p in included_programmes:
-        epg += str(p).replace('&', '&amp;') + "\r\n"
+        parts.append(str(p).replace('&', '&amp;'))
+        parts.append("\r\n")
 
-    epg += "</tv>"
+    parts.append("</tv>")
+    epg = "".join(parts)
     logger.info("Responded to epg API call")
     return HttpResponse(epg, content_type="text/xml")
 
