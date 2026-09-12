@@ -1,4 +1,22 @@
 from django.db import models
+from xml.sax.saxutils import escape as _xml_escape
+
+# M3U has no formal escaping convention, so a value that would break line
+# framing (CR/LF - which could inject extra fake #EXTINF/URL lines into the
+# output) or attribute quoting (an embedded ") has to be sanitized by hand.
+def _m3u_safe(value):
+    if value is None:
+        return ''
+    return str(value).replace('\r', ' ').replace('\n', ' ').replace('"', "'")
+
+# XML text content only needs &, <, > escaped; attribute values (which this
+# code always double-quotes) also need " escaped so an embedded quote can't
+# terminate the attribute early.
+def _xml_text(value):
+    return _xml_escape(value or '')
+
+def _xml_attr(value):
+    return _xml_escape(value or '', {'"': '&quot;'})
 
 # this will be configs like the URL to pull from, how often to refresh etc
 class AppConfig(models.Model):
@@ -29,8 +47,13 @@ class PlaylistChannel(models.Model):
         ]
 
     def __str__(self):
-        text = f"#EXTINF:-1 tvg-id=\"{self.tvg_id}\" tvg-name=\"{self.tvg_name}\" tvg-logo=\"{self.tvg_logo}\" group-title=\"{self.group_title}\",{self.tvg_name}\r\n"
-        text += self.stream_url
+        tvg_id = _m3u_safe(self.tvg_id)
+        tvg_name = _m3u_safe(self.tvg_name)
+        tvg_logo = _m3u_safe(self.tvg_logo)
+        group_title = _m3u_safe(self.group_title)
+        stream_url = _m3u_safe(self.stream_url)
+        text = f"#EXTINF:-1 tvg-id=\"{tvg_id}\" tvg-name=\"{tvg_name}\" tvg-logo=\"{tvg_logo}\" group-title=\"{group_title}\",{tvg_name}\r\n"
+        text += stream_url
         return text
 
 class EpgChannel(models.Model):
@@ -40,10 +63,10 @@ class EpgChannel(models.Model):
     last_updated = models.DateTimeField(null=True,blank=True, db_index=True)
     included = models.BooleanField(default=None,null=True, db_index=True) #None = inherit from PlaylistGroup, False = force no, True = force yes.
     def __str__(self):
-        text =  f'<channel id="{self.channel_id}">\n'
-        text += f'  <display-name>{self.display_name}</display-name>\n'
+        text =  f'<channel id="{_xml_attr(self.channel_id)}">\n'
+        text += f'  <display-name>{_xml_text(self.display_name)}</display-name>\n'
         if self.icon:
-            text += f'  <icon src="{self.icon}"/>\n'
+            text += f'  <icon src="{_xml_attr(self.icon)}"/>\n'
         text += '</channel>'
         return text
 
@@ -56,10 +79,10 @@ class EpgProgramme(models.Model):
     last_updated = models.DateTimeField(null=True,blank=True, db_index=True)
     included = models.BooleanField(default=None,null=True, db_index=True) #None = inherit from PlaylistGroup, False = force no, True = force yes.
     def __str__(self):
-        text =  f'<programme start="{self.start}" stop="{self.stop}" channel="{self.channel}">\n'
-        text += f'  <title>{self.title}</title>\n'
+        text =  f'<programme start="{_xml_attr(self.start)}" stop="{_xml_attr(self.stop)}" channel="{_xml_attr(self.channel)}">\n'
+        text += f'  <title>{_xml_text(self.title)}</title>\n'
         if self.desc:
-            text += f'  <desc>{self.desc}</desc>\n'
+            text += f'  <desc>{_xml_text(self.desc)}</desc>\n'
         text += '</programme>'
         return text
 

@@ -98,12 +98,12 @@ def epg_api(request):
 """]
     included_channels = EpgChannel.objects.filter(included = True)
     for c in included_channels:
-        parts.append(str(c).replace('&', '&amp;'))
+        parts.append(str(c))
         parts.append("\r\n")
 
     included_programmes = EpgProgramme.objects.filter(included = True)
     for p in included_programmes:
-        parts.append(str(p).replace('&', '&amp;'))
+        parts.append(str(p))
         parts.append("\r\n")
 
     parts.append("</tv>")
