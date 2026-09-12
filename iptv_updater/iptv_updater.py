@@ -12,8 +12,14 @@ import logging
 logger = logging.getLogger(__name__)
 
 def update_all():
-    update_m3u()
-    update_epg()
+    try:
+        update_m3u()
+    except Exception:
+        logger.exception("Unhandled error during startup M3U update.")
+    try:
+        update_epg()
+    except Exception:
+        logger.exception("Unhandled error during startup EPG update.")
 
 def update_m3u():
     if _retrieve('m3u'):
@@ -36,7 +42,12 @@ def update_m3u_scheduled():
 
         logging.info(f"Next M3U Load scheduled for {next_m3u_loadtime}")
         time.sleep((next_m3u_loadtime-timezone.now()).total_seconds())
-        update_m3u()
+        try:
+            update_m3u()
+        except Exception:
+            # A single bad cycle shouldn't permanently kill the scheduler -
+            # log it and try again at the next scheduled time.
+            logger.exception("Unhandled error during scheduled M3U update; will retry next cycle.")
 
 def update_epg_scheduled():
     # TODO: Assuming every half hour, make configurable
@@ -48,13 +59,18 @@ def update_epg_scheduled():
         
         logging.info(f"Next EPG Load scheduled for {next_epg_loadtime}")
         time.sleep((next_epg_loadtime-timezone.now()).total_seconds())
-        update_epg()
+        try:
+            update_epg()
+        except Exception:
+            logger.exception("Unhandled error during scheduled EPG update; will retry next cycle.")
 
 
 # "m3u" and "epg" for now...
 def _retrieve(filetype):
-    # TODO: What if there is no URL?
     configs = AppConfig.objects.filter(key=filetype+"_url")
+    if not configs:
+        logger.warning(f"No {filetype} URL configured yet (set IPTV_{filetype.upper()}_URL or configure it) - skipping retrieval.")
+        return False
     url = configs[0].value
 
     logging.info(f"Retrieving fresh {filetype} file from {url}")
@@ -76,8 +92,11 @@ def _retrieve(filetype):
 @transaction.atomic
 def _update_tables(filetype):
     now = timezone.now()
-    # TODO: what if file doesn't exist?
-    file = CachedFile.objects.filter(file_type=filetype)[0].file.decode()
+    cached = CachedFile.objects.filter(file_type=filetype)
+    if not cached:
+        logger.warning(f"No cached {filetype} file to process yet - skipping table update.")
+        return False
+    file = cached[0].file.decode()
 
     if filetype == 'm3u':
         # Real-world M3U sources don't agree on attribute order (or even which
