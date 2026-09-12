@@ -11,15 +11,28 @@ from iptv_filter.models import AppConfig, CachedFile, PlaylistChannel, EpgChanne
 import logging
 logger = logging.getLogger(__name__)
 
+# In-memory record of the most recent error per filetype, surfaced via the
+# /status endpoint. Intentionally not persisted to the DB - it's meant to
+# answer "is this currently healthy", which naturally resets on restart.
+_last_error = {}
+
+def _record_error(filetype, message):
+    _last_error[filetype] = {'time': timezone.now(), 'message': message}
+
+def get_last_error(filetype):
+    return _last_error.get(filetype)
+
 def update_all():
     try:
         update_m3u()
-    except Exception:
+    except Exception as e:
         logger.exception("Unhandled error during startup M3U update.")
+        _record_error('m3u', str(e))
     try:
         update_epg()
-    except Exception:
+    except Exception as e:
         logger.exception("Unhandled error during startup EPG update.")
+        _record_error('epg', str(e))
 
 def update_m3u():
     if _retrieve('m3u'):
@@ -44,10 +57,11 @@ def update_m3u_scheduled():
         time.sleep((next_m3u_loadtime-timezone.now()).total_seconds())
         try:
             update_m3u()
-        except Exception:
+        except Exception as e:
             # A single bad cycle shouldn't permanently kill the scheduler -
             # log it and try again at the next scheduled time.
             logger.exception("Unhandled error during scheduled M3U update; will retry next cycle.")
+            _record_error('m3u', str(e))
 
 def update_epg_scheduled():
     # TODO: Assuming every half hour, make configurable
@@ -61,8 +75,9 @@ def update_epg_scheduled():
         time.sleep((next_epg_loadtime-timezone.now()).total_seconds())
         try:
             update_epg()
-        except Exception:
+        except Exception as e:
             logger.exception("Unhandled error during scheduled EPG update; will retry next cycle.")
+            _record_error('epg', str(e))
 
 
 # "m3u" and "epg" for now...
@@ -82,11 +97,13 @@ def _retrieve(filetype):
         # Covers connection errors (DNS failures, refused connections, timeouts)
         # and non-2xx responses (raise_for_status) without crashing the caller.
         logger.warning(f"Failed to retrieve {filetype} file from {url}: {e}")
+        _record_error(filetype, str(e))
         return False
 
     now = timezone.now()
     CachedFile.objects.update_or_create(file_type=filetype, defaults={'file':r.text.encode(), 'last_updated':now})
     logging.info(f"Received fresh {filetype} file, size {len(r.text.encode())}")
+    _last_error.pop(filetype, None)
     return True
 
 @transaction.atomic
