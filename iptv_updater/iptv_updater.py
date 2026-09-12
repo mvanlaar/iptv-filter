@@ -80,9 +80,15 @@ def _update_tables(filetype):
     file = CachedFile.objects.filter(file_type=filetype)[0].file.decode()
 
     if filetype == 'm3u':
-        # TODO: store regex in AppConfig, as well as relative index/position of id, name, etc. in case other providers format this differently.
-        infopattern = re.compile('(?i)#EXTINF:-1 tvg-id="(.*?)" tvg-name="(.*?)" tvg-logo="(.*?)" group-title="(.*?)",(.*?)')
-        urlpattern = re.compile('(?i)^http')
+        # Real-world M3U sources don't agree on attribute order (or even which
+        # attributes are present - tvg-id in particular is often missing), so
+        # match each "key=value" pair independently instead of assuming a
+        # fixed sequence like 'tvg-id="..." tvg-name="..." tvg-logo="..." group-title="..."'.
+        extinf_pattern = re.compile(r'^#EXTINF:', re.IGNORECASE)
+        attr_pattern = re.compile(r'([\w-]+)="(.*?)"')
+        # Stream URLs in the wild aren't always http(s) - rtsp/rtmp/rtmps/udp/rtp
+        # all show up in real IPTV playlists.
+        urlpattern = re.compile(r'(?i)^(https?|rtsps?|rtmps?|udp|rtp)://')
 
         start_perftime = time.perf_counter()
 
@@ -93,10 +99,24 @@ def _update_tables(filetype):
         parsed = {}
         pending_extinf = None  # Reset so a stray/duplicate URL line can't reuse a stale channel from a previous iteration.
         for line in file.splitlines():
-            m = infopattern.findall(line)
-            if len(m) > 0:
+            if extinf_pattern.match(line):
                 # This was an #EXTINF line.
-                pending_extinf = {'tvg_id': m[0][0], 'tvg_name': m[0][1], 'tvg_logo': m[0][2], 'group_title': m[0][3]}
+                attrs = dict(attr_pattern.findall(line))
+                # The display name is whatever follows the last comma on the
+                # line (the M3U convention), used as a fallback if tvg-name
+                # itself is missing.
+                display_name = line.rsplit(',', 1)[-1].strip() if ',' in line else ''
+                tvg_name = attrs.get('tvg-name') or display_name
+                if not tvg_name:
+                    # Nothing usable to key this channel on - skip it.
+                    pending_extinf = None
+                    continue
+                pending_extinf = {
+                    'tvg_id': attrs.get('tvg-id', ''),
+                    'tvg_name': tvg_name,
+                    'tvg_logo': attrs.get('tvg-logo', ''),
+                    'group_title': attrs.get('group-title', ''),
+                }
                 # stream_url gets filled in on the next line.
 
             else:
@@ -105,6 +125,9 @@ def _update_tables(filetype):
                     pending_extinf['stream_url'] = line
                     parsed[pending_extinf['tvg_name']] = pending_extinf
                     pending_extinf = None  # Consumed; don't let a duplicate/extra URL line re-add this channel.
+                # else: not a recognized stream URL (e.g. a "[NO PUBLIC STREAM]"
+                # placeholder) - the pending channel has no usable stream and
+                # is dropped when the next #EXTINF line overwrites pending_extinf.
 
         # Diff against what's already in the DB instead of deleting everything
         # and recreating it: most channels are unchanged between pulls, so we
