@@ -21,10 +21,12 @@ class PlaylistChannel(models.Model):
     first_seen = models.DateTimeField(null=True,blank=True, db_index=True)
     last_updated = models.DateTimeField(null=True,blank=True, db_index=True)
     included = models.BooleanField(default=None,null=True, db_index=True) #None = inherit from PlaylistGroup, False = force no, True = force yes.
-    constraints = [
-        models.UniqueConstraint(fields=['tvg_name'],name="unique name for PlaylistChannel")
-    ]
     group_title = models.CharField(max_length=50)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['tvg_name'],name="unique name for PlaylistChannel")
+        ]
 
     def __str__(self):
         text = f"#EXTINF:-1 tvg-id=\"{self.tvg_id}\" tvg-name=\"{self.tvg_name}\" tvg-logo=\"{self.tvg_logo}\" group-title=\"{self.group_title}\",{self.tvg_name}\r\n"
