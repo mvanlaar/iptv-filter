@@ -16,12 +16,16 @@ def update_all():
     update_epg()
 
 def update_m3u():
-    _retrieve('m3u')
-    _update_tables('m3u')
-    
+    if _retrieve('m3u'):
+        _update_tables('m3u')
+    else:
+        logger.warning("Skipping m3u table update because retrieval failed.")
+
 def update_epg():
-    _retrieve('epg')
-    _update_tables('epg')
+    if _retrieve('epg'):
+        _update_tables('epg')
+    else:
+        logger.warning("Skipping epg table update because retrieval failed.")
 
 def update_m3u_scheduled():
     # TODO: Assuming 4am, make configurable.
@@ -54,17 +58,20 @@ def _retrieve(filetype):
     url = configs[0].value
 
     logging.info(f"Retrieving fresh {filetype} file from {url}")
-    r = requests.get(url)
-    now = timezone.now()
 
     try:
+        r = requests.get(url, timeout=30)
         r.raise_for_status()
-        CachedFile.objects.update_or_create(file_type=filetype, defaults={'file':r.text.encode(), 'last_updated':now})
-        logging.info(f"Received fresh {filetype} file, size {len(r.text.encode())}")
-        return True
-
-    except:
+    except requests.exceptions.RequestException as e:
+        # Covers connection errors (DNS failures, refused connections, timeouts)
+        # and non-2xx responses (raise_for_status) without crashing the caller.
+        logger.warning(f"Failed to retrieve {filetype} file from {url}: {e}")
         return False
+
+    now = timezone.now()
+    CachedFile.objects.update_or_create(file_type=filetype, defaults={'file':r.text.encode(), 'last_updated':now})
+    logging.info(f"Received fresh {filetype} file, size {len(r.text.encode())}")
+    return True
 
 @transaction.atomic
 def _update_tables(filetype):
