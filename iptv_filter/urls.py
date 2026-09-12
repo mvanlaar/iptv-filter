@@ -9,6 +9,7 @@ urlpatterns = [
     path('configure', views.configure, name='configure'),
     path('channels', views.channel_api, name='channel_api'),
     path('channels/<int:id>', views.channel_api, name='channel_api_with_id'),
+    path('status', views.status_api, name='status_api'),
     path('retrieve/m3u', views._retrieve_m3u, name='retm3u'),
     path('retrieve/epg', views._retrieve_epg, name='retepg'),
     path('update/m3u', views._update_m3u_tables, name='updm3u'),
