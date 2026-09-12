@@ -84,50 +84,81 @@ def _update_tables(filetype):
         infopattern = re.compile('(?i)#EXTINF:-1 tvg-id="(.*?)" tvg-name="(.*?)" tvg-logo="(.*?)" group-title="(.*?)",(.*?)')
         urlpattern = re.compile('(?i)^http')
 
-        existing_channels = dict(PlaylistChannel.objects.values_list('tvg_name', 'first_seen'))
-        included_channels = set(PlaylistChannel.objects.filter(included=True).values_list('tvg_name', flat=True))
-        PlaylistChannel.objects.all().delete()
-
         start_perftime = time.perf_counter()
-        new_channels = []
-        pc = None  # Reset so a stray/duplicate URL line can't reuse a stale channel from a previous iteration.
+
+        # Parse the file into a dict keyed by tvg_name (the natural/unique key).
+        # A dict naturally de-dupes if the source has the same tvg_name twice
+        # (last one wins), which also protects bulk_create from the unique
+        # constraint on tvg_name.
+        parsed = {}
+        pending_extinf = None  # Reset so a stray/duplicate URL line can't reuse a stale channel from a previous iteration.
         for line in file.splitlines():
             m = infopattern.findall(line)
             if len(m) > 0:
                 # This was an #EXTINF line.
-                tvg_name = m[0][1]
-
-                if tvg_name in existing_channels:
-                    included = tvg_name in included_channels
-                    first_seen = existing_channels[tvg_name]
-                else:
-                    # TODO: Whitelists/blacklists for whether to include newly found channels (movies/tv series probably)
-                    included = False
-                    first_seen = now
-
-                pc = PlaylistChannel(tvg_id=m[0][0], tvg_name=tvg_name, tvg_logo=m[0][2], group_title=m[0][3], last_updated=now, first_seen=first_seen, included=included)
-                # save after we parse the URL on the next line.
+                pending_extinf = {'tvg_id': m[0][0], 'tvg_name': m[0][1], 'tvg_logo': m[0][2], 'group_title': m[0][3]}
+                # stream_url gets filled in on the next line.
 
             else:
-                if urlpattern.match(line) and pc is not None:
+                if urlpattern.match(line) and pending_extinf is not None:
                     # This is the URL line.
-                    pc.stream_url = line
-                    # pc.output_representation = _map_m3u_channel(pc)
-                    new_channels.append(pc)
-                    pc = None  # Consumed; don't let a duplicate/extra URL line re-add this channel.
-        PlaylistChannel.objects.bulk_create(new_channels)
-        logging.info(f"Done with Channels in {time.perf_counter()-start_perftime} seconds.")
+                    pending_extinf['stream_url'] = line
+                    parsed[pending_extinf['tvg_name']] = pending_extinf
+                    pending_extinf = None  # Consumed; don't let a duplicate/extra URL line re-add this channel.
+
+        # Diff against what's already in the DB instead of deleting everything
+        # and recreating it: most channels are unchanged between pulls, so we
+        # only need to write the rows that are actually new, changed, or gone.
+        # .values() avoids the cost of instantiating a full model object per
+        # row just to compare a few fields.
+        existing = {
+            v['tvg_name']: v for v in
+            PlaylistChannel.objects.all().values('pk', 'tvg_name', 'tvg_id', 'tvg_logo', 'group_title', 'stream_url')
+        }
+
+        to_create = []
+        to_update = []
+        for tvg_name, pdata in parsed.items():
+            if tvg_name in existing:
+                ex = existing[tvg_name]
+                if (ex['tvg_id'] != pdata['tvg_id'] or ex['tvg_logo'] != pdata['tvg_logo']
+                        or ex['group_title'] != pdata['group_title'] or ex['stream_url'] != pdata['stream_url']):
+                    to_update.append(PlaylistChannel(
+                        pk=ex['pk'], tvg_id=pdata['tvg_id'], tvg_logo=pdata['tvg_logo'],
+                        group_title=pdata['group_title'], stream_url=pdata['stream_url'], last_updated=now))
+                # else: unchanged, nothing to write.
+            else:
+                # TODO: Whitelists/blacklists for whether to include newly found channels (movies/tv series probably)
+                to_create.append(PlaylistChannel(
+                    tvg_id=pdata['tvg_id'], tvg_name=tvg_name, tvg_logo=pdata['tvg_logo'],
+                    group_title=pdata['group_title'], stream_url=pdata['stream_url'],
+                    last_updated=now, first_seen=now, included=False))
+
+        stale_names = existing.keys() - parsed.keys()
+        if stale_names:
+            PlaylistChannel.objects.filter(tvg_name__in=stale_names).delete()
+        if to_create:
+            PlaylistChannel.objects.bulk_create(to_create)
+        if to_update:
+            PlaylistChannel.objects.bulk_update(to_update, ['tvg_id', 'tvg_logo', 'group_title', 'stream_url', 'last_updated'])
+
+        logging.info(
+            f"Done with Channels in {time.perf_counter()-start_perftime} seconds. "
+            f"({len(to_create)} new, {len(to_update)} changed, {len(stale_names)} removed, "
+            f"{len(parsed)-len(to_create)-len(to_update)} unchanged)"
+        )
 
     elif filetype == 'epg':
         root = ET.fromstring(file)
-
         included_channel_ids = set(PlaylistChannel.objects.filter(included=True).values_list('tvg_id', flat=True))
 
+        # channel/programme are direct children of the root <tv> element in
+        # XMLTV files, so a plain (non-recursive) findall avoids walking every
+        # descendant element (title/desc/category/credits/etc. inside every
+        # programme) that './/' would otherwise visit.
         start_perftime = time.perf_counter()
-        new_channels=[]
-        channels = root.findall('.//channel')
-        EpgChannel.objects.all().delete()
-        for channel in channels:
+        parsed_channels = {}
+        for channel in root.findall('channel'):
             ch_id = channel.get('id')
             if not ch_id or len(ch_id) == 0:
                 continue
@@ -143,15 +174,40 @@ def _update_tables(filetype):
                 elif child.tag == 'icon':
                     icon = child.get('src')
 
-            new_channels.append(EpgChannel(channel_id=ch_id, display_name=display_name, icon=icon, included=ch_id in included_channel_ids, last_updated=now))
-        EpgChannel.objects.bulk_create(new_channels)
-        logging.info(f"Done with EPG Channels in {time.perf_counter()-start_perftime} seconds.")
+            parsed_channels[ch_id] = {'display_name': display_name, 'icon': icon}
+
+        existing_channels = {
+            v['channel_id']: v for v in
+            EpgChannel.objects.all().values('pk', 'channel_id', 'display_name', 'icon', 'included')
+        }
+
+        to_create = []
+        to_update = []
+        for ch_id, pdata in parsed_channels.items():
+            included = ch_id in included_channel_ids
+            if ch_id in existing_channels:
+                ex = existing_channels[ch_id]
+                if ex['display_name'] != pdata['display_name'] or ex['icon'] != pdata['icon'] or ex['included'] != included:
+                    to_update.append(EpgChannel(pk=ex['pk'], display_name=pdata['display_name'], icon=pdata['icon'], included=included, last_updated=now))
+            else:
+                to_create.append(EpgChannel(channel_id=ch_id, display_name=pdata['display_name'], icon=pdata['icon'], included=included, last_updated=now))
+
+        stale_channel_ids = existing_channels.keys() - parsed_channels.keys()
+        if stale_channel_ids:
+            EpgChannel.objects.filter(channel_id__in=stale_channel_ids).delete()
+        if to_create:
+            EpgChannel.objects.bulk_create(to_create)
+        if to_update:
+            EpgChannel.objects.bulk_update(to_update, ['display_name', 'icon', 'included', 'last_updated'])
+
+        logging.info(
+            f"Done with EPG Channels in {time.perf_counter()-start_perftime} seconds. "
+            f"({len(to_create)} new, {len(to_update)} changed, {len(stale_channel_ids)} removed)"
+        )
 
         start_perftime = time.perf_counter()
-        new_programmes=[]
-        programmes = root.findall('.//programme')
-        EpgProgramme.objects.exclude(last_updated=now).delete()
-        for programme in programmes:
+        parsed_programmes = {}
+        for programme in root.findall('programme'):
             ch_id = programme.get('channel')
             if not ch_id or len(ch_id) == 0:
                 continue
@@ -170,8 +226,40 @@ def _update_tables(filetype):
                 elif child.tag == 'desc':
                     desc = child.text or ''
 
-            new_programmes.append(EpgProgramme(channel=ch_id, start=start, stop=stop, title=title, desc=desc, included=ch_id in included_channel_ids, last_updated=now))
-        EpgProgramme.objects.bulk_create(new_programmes)
-        logging.info(f"Done with EPG Programmes in {time.perf_counter()-start_perftime} seconds.")
+            # (channel, start) is the natural key for a programme slot.
+            parsed_programmes[(ch_id, start)] = {'stop': stop, 'title': title, 'desc': desc}
+
+        existing_programmes = {
+            (v['channel'], v['start']): v for v in
+            EpgProgramme.objects.all().values('pk', 'channel', 'start', 'stop', 'title', 'desc', 'included')
+        }
+
+        to_create = []
+        to_update = []
+        for key, pdata in parsed_programmes.items():
+            ch_id, start = key
+            included = ch_id in included_channel_ids
+            if key in existing_programmes:
+                ex = existing_programmes[key]
+                if (ex['stop'] != pdata['stop'] or ex['title'] != pdata['title']
+                        or ex['desc'] != pdata['desc'] or ex['included'] != included):
+                    to_update.append(EpgProgramme(pk=ex['pk'], stop=pdata['stop'], title=pdata['title'], desc=pdata['desc'], included=included, last_updated=now))
+            else:
+                to_create.append(EpgProgramme(channel=ch_id, start=start, stop=pdata['stop'], title=pdata['title'], desc=pdata['desc'], included=included, last_updated=now))
+
+        stale_keys = existing_programmes.keys() - parsed_programmes.keys()
+        if stale_keys:
+            stale_pks = [existing_programmes[k]['pk'] for k in stale_keys]
+            EpgProgramme.objects.filter(pk__in=stale_pks).delete()
+        if to_create:
+            EpgProgramme.objects.bulk_create(to_create)
+        if to_update:
+            EpgProgramme.objects.bulk_update(to_update, ['stop', 'title', 'desc', 'included', 'last_updated'])
+
+        logging.info(
+            f"Done with EPG Programmes in {time.perf_counter()-start_perftime} seconds. "
+            f"({len(to_create)} new, {len(to_update)} changed, {len(stale_keys)} removed, "
+            f"{len(parsed_programmes)-len(to_create)-len(to_update)} unchanged)"
+        )
 
     return True
