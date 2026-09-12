@@ -82,6 +82,30 @@ The following are the common URLs to use:
 * http://localhost:8000/configure - set up the included groups whose channels you will be watching (Hit submit at the bottom of the page). Older interface but useful for managing entire groups at a time.
 * http://localhost:8000/m3u - the m3u file your IPTV player should point to
 * http://localhost:8000/epg - the epg file your IPTV player should point to
+* http://localhost:8000/status - JSON health check: last successful fetch time, current error (if any), and channel/programme counts for both m3u and epg. Useful if you're running this unattended (e.g. in Docker) and want to confirm it's actually staying up to date. Example:
+  ```json
+  {
+    "healthy": true,
+    "server_time": "2026-09-12T17:54:03Z",
+    "m3u": {
+      "url_configured": true,
+      "last_successful_fetch": "2026-09-12T04:00:03Z",
+      "last_error": null,
+      "channel_count": 2030,
+      "included_channel_count": 500
+    },
+    "epg": {
+      "url_configured": true,
+      "last_successful_fetch": "2026-09-12T17:30:02Z",
+      "last_error": null,
+      "channel_count": 184,
+      "included_channel_count": 40,
+      "programme_count": 37025,
+      "included_programme_count": 8200
+    }
+  }
+  ```
+  `healthy` is `false` until both m3u and epg have a URL configured and have loaded successfully at least once. `last_error`, when present, shows the most recent failure and when it happened; it's cleared automatically the next time that source loads successfully.
 
 These are utility URLs and probably won't be needed.
 * http://localhost:8000/retrieve/m3u - force an immediate m3u retrieval
