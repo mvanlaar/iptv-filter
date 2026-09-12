@@ -3,7 +3,7 @@ import time
 import json
 import xml.etree.ElementTree as ET
 from django.shortcuts import render
-from django.http import HttpResponse
+from django.http import HttpResponse, StreamingHttpResponse
 from django.db.models import Count
 from django.core import serializers
 from iptv_filter.models import PlaylistChannel, CachedFile, EpgChannel, EpgProgramme, AppConfig
@@ -31,8 +31,24 @@ def playlistChannel2json(pc, last_visit):
         'new' : new
     }
 
+def _channel_json_stream(last_visit):
+    # .iterator() reads rows from the DB cursor in chunks instead of Django
+    # caching the entire queryset result in memory, and yielding one row at a
+    # time (rather than building a full list + a full JSON string first)
+    # keeps peak memory proportional to chunk_size instead of table size.
+    qs = (PlaylistChannel.objects.all()
+          .values('pk', 'group_title', 'tvg_id', 'tvg_name', 'included', 'first_seen')
+          .iterator(chunk_size=2000))
+    yield '['
+    first = True
+    for obj in qs:
+        if not first:
+            yield ','
+        first = False
+        yield json.dumps(playlistChannel2json(obj, last_visit))
+    yield ']'
+
 def channel_api(request, id=-1):
-    print(request.method)
     if request.method == 'GET':
         ac_lv = AppConfig.objects.filter(key='last_visit')
         if len(ac_lv) > 0:
@@ -40,12 +56,9 @@ def channel_api(request, id=-1):
         else:
             last_visit = timezone.now()
 
-        objs = PlaylistChannel.objects.all().values('pk','group_title','tvg_id','tvg_name', 'included', 'first_seen')
-        payload = json.dumps(list(map(lambda obj: playlistChannel2json(obj,last_visit), objs)))
-
         AppConfig.objects.update_or_create(key='last_visit', defaults={'value':timezone.now(), 'last_updated':timezone.now()})
 
-        return HttpResponse(payload)
+        return StreamingHttpResponse(_channel_json_stream(last_visit), content_type='application/json')
 
     # I wanted this to be a PUT but Django doesnt support it??
     elif request.method == 'POST':
