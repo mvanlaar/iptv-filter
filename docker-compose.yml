@@ -6,5 +6,6 @@ services:
     environment:
       - IPTV_M3U_URL=
       - IPTV_EPG_URL=
+      - TZ=
     ports:
       - "8000:8000"
