@@ -4,6 +4,7 @@ from . import views
 
 urlpatterns = [
     path('', views.index, name='index'),
+    path('favicon.ico', views.favicon, name='favicon'),
     path('m3u', views.m3u_api, name='m3u_api'),
     path('epg', views.epg_api, name='epg_api'),
     path('configure', views.configure, name='configure'),
