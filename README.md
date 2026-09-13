@@ -36,6 +36,7 @@ Run the container: `docker-compose up`
 
 * `export IPTV_M3U_URL="<your_m3u_url>"`
 * `export IPTV_EPG_URL="<your_epg_url>"`
+* `export TZ="Europe/Amsterdam"` (optional - controls how times are displayed, e.g. in the admin site and the `runserver` startup banner; defaults to `Europe/Amsterdam` if not set)
 * `python3 manage.py runserver 0:8000 --noreload` (this is what `./run.sh` does)
 
 #### Upgrading
@@ -57,6 +58,7 @@ Run the container: `docker-compose up`
 
 * `SET IPTV_M3U_URL="<your_m3u_url>"`
 * `SET IPTV_EPG_URL="<your_epg_url>"`
+* `SET TZ="Europe/Amsterdam"` (optional - see the note above)
 * `python manage.py runserver 0:8000 --noreload`
 
 #### Upgrading
