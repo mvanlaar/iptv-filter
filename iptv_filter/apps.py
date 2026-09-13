@@ -13,8 +13,11 @@ class IptvFilterConfig(AppConfig):
     def ready(self):
         import os
         from django.utils import timezone
+        from . import __version__
         from .models import AppConfig as AppConfigModel
         from iptv_updater import iptv_updater
+
+        logging.info(f"iptv-filter v{__version__} starting up")
 
         safe_start = os.getenv('IPTV_SAFE_START')
         if safe_start:

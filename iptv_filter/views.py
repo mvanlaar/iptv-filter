@@ -7,6 +7,7 @@ from django.http import HttpResponse, StreamingHttpResponse
 from django.db.models import Count
 from django.core import serializers
 from iptv_filter.models import PlaylistChannel, CachedFile, EpgChannel, EpgProgramme, AppConfig
+from iptv_filter import __version__
 from iptv_updater import iptv_updater
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
@@ -201,6 +202,7 @@ def status_api(request):
     )
 
     payload = {
+        'version': __version__,
         'healthy': healthy,
         'server_time': now.isoformat(),
         'm3u': m3u_status,
