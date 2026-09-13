@@ -1,9 +1,10 @@
 import copy
+import os
 import time
 import json
 import xml.etree.ElementTree as ET
 from django.shortcuts import render
-from django.http import HttpResponse, StreamingHttpResponse
+from django.http import HttpResponse, StreamingHttpResponse, FileResponse
 from django.db.models import Count
 from django.core import serializers
 from iptv_filter.models import PlaylistChannel, CachedFile, EpgChannel, EpgProgramme, AppConfig
@@ -79,6 +80,16 @@ def channel_api(request, id=-1):
 
 def index(request):
     return render(request, 'iptv_filter/index.html')
+
+_FAVICON_PATH = os.path.join(os.path.dirname(__file__), 'static', 'favicon.ico')
+
+def favicon(request):
+    # Served directly rather than via the staticfiles app so it works the
+    # same way regardless of DEBUG/collectstatic configuration - browsers
+    # request this at the site root, not under STATIC_URL.
+    response = FileResponse(open(_FAVICON_PATH, 'rb'), content_type='image/x-icon')
+    response['Cache-Control'] = 'public, max-age=604800'  # a week - favicons rarely change
+    return response
 
 def m3u_api(request):
     logger.info("Received m3u API call")
