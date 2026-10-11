@@ -10,5 +10,9 @@ services:
       # - IPTV_USER_AGENT=
       # - IPTV_READ_TIMEOUT=300
       # - IPTV_SKIP_VOD=1
+      # - IPTV_LOGO_CACHE=0
+      # - IPTV_LOGO_ALLOW_PRIVATE=1
     ports:
       - "8000:8000"
+    # volumes:
+    #   - ./logo_cache:/code/logo_cache   # keep cached logos across container re-creation

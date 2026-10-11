@@ -115,6 +115,25 @@ def set_gui_skip_vod(enabled):
                 f"(overrides environment variable IPTV_SKIP_VOD).")
 
 
+# --- local logo cache --------------------------------------------------------
+
+def get_logo_cache():
+    """-> (enabled, source). On by default; IPTV_LOGO_CACHE=0/false/off disables it."""
+    gui = _get('logo_cache')
+    if gui is not None:
+        return gui == '1', GUI
+    env = (os.getenv('IPTV_LOGO_CACHE') or '').strip().lower()
+    if env:
+        return env not in ('0', 'false', 'no', 'off'), ENV
+    return True, 'default'
+
+
+def set_gui_logo_cache(enabled):
+    _set('logo_cache', '1' if enabled else '0')
+    logger.info(f"Settings - local logo cache saved from the web GUI: {'ON' if enabled else 'OFF'} "
+                f"(overrides environment variable IPTV_LOGO_CACHE).")
+
+
 # --- startup -----------------------------------------------------------------
 
 def apply_at_startup():
@@ -141,3 +160,8 @@ def apply_at_startup():
     where = {'gui': 'the value configured in the web GUI', 'env': 'environment variable IPTV_SKIP_VOD',
              'default': 'default'}[source]
     logger.info(f"Startup - skip movies/series: {'ON' if enabled else 'OFF'} (from {where})")
+
+    lc_enabled, lc_source = get_logo_cache()
+    lc_where = {'gui': 'the value configured in the web GUI', 'env': 'environment variable IPTV_LOGO_CACHE',
+                'default': 'default'}[lc_source]
+    logger.info(f"Startup - local logo cache: {'ON' if lc_enabled else 'OFF'} (from {lc_where})")

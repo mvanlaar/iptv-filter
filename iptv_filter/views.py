@@ -6,13 +6,13 @@ import xml.etree.ElementTree as ET
 from django.contrib import messages
 from django.db.models.functions import Length
 from django.shortcuts import render, redirect
-from django.http import HttpResponse, StreamingHttpResponse, FileResponse
+from django.http import HttpResponse, StreamingHttpResponse, FileResponse, Http404, HttpResponseNotModified
 from django.db import OperationalError
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.db.models import Count
 from django.core import serializers
-from iptv_filter.models import PlaylistChannel, CachedFile, EpgChannel, EpgProgramme, AppConfig
-from iptv_filter import __version__, settings_store
+from iptv_filter.models import PlaylistChannel, CachedFile, EpgChannel, EpgProgramme, AppConfig, LogoCache
+from iptv_filter import __version__, settings_store, logo_cache
 from iptv_updater import iptv_updater
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
@@ -83,6 +83,7 @@ def channel_api(request, id=-1):
                 except (json.JSONDecodeError, KeyError) as e:
                     return HttpResponse(json.dumps({'result': 'error', 'message': f'Invalid request body: {e}'}), status=400, content_type='application/json')
                 ch.save()
+                logo_cache.request_sync()  # (debounced) cache the logo of a newly ticked channel
 
         # TODO: Error class for consistent json responses?
         return HttpResponse(json.dumps({'result':'success'}))
@@ -108,9 +109,14 @@ def m3u_api(request):
     logger.info("Received m3u API call")
     included_channels = PlaylistChannel.objects.filter(included = True)
 
+    # Logos that are cached locally are served from this server (same host the
+    # client used to fetch this playlist); the rest keep their original URL.
+    lookup = logo_cache.cached_lookup() if logo_cache.enabled() else {}
+    base = request.build_absolute_uri('/logo/')
+
     parts = ["#EXTM3U\r\n"]
     for c in included_channels:
-        parts.append(str(c))
+        parts.append(c.to_m3u(logo_cache.local_logo_url(base, c.tvg_logo, lookup) if lookup else None))
         parts.append("\r\n")
     m3u = "".join(parts)
 
@@ -191,6 +197,8 @@ def configure(request):
                 EpgChannel.objects.filter(channel_id=channel).update(included=True)
                 EpgProgramme.objects.filter(channel=channel).update(included=True)
 
+        logo_cache.request_sync()
+
         # Post/Redirect/Get: back to the form with a confirmation instead of
         # leaving the browser on a bare text response.
         return redirect(f'/configure?saved={time.perf_counter()-start_perftime:.1f}')
@@ -264,6 +272,8 @@ def dashboard(request):
         'sources': [source('m3u', 'Playlist (M3U)', 'bi-file-earmark-play'),
                     source('epg', 'Guide (EPG)', 'bi-calendar3')],
         'output_urls': output_urls,
+        'logo_stats': logo_cache.stats(),
+        'logo_enabled': logo_cache.enabled(),
     })
 
 
@@ -307,7 +317,9 @@ def _settings_context():
             'cached': cached,
         })
     skip, skip_source = settings_store.get_skip_vod()
-    return {'sources': sources, 'skip_vod': skip, 'skip_vod_source': skip_source}
+    logo_on, logo_source = settings_store.get_logo_cache()
+    return {'sources': sources, 'skip_vod': skip, 'skip_vod_source': skip_source,
+            'logo_cache': logo_on, 'logo_cache_source': logo_source, 'logo_stats': logo_cache.stats()}
 
 def settings_page(request):
     if request.method == 'POST':
@@ -343,7 +355,14 @@ def settings_page(request):
         if skip_changed:
             settings_store.set_gui_skip_vod(skip_wanted)
 
-        if changed or skip_changed:
+        logo_wanted = request.POST.get('logo_cache') == 'on'
+        logo_changed = logo_wanted != settings_store.get_logo_cache()[0]
+        if logo_changed:
+            settings_store.set_gui_logo_cache(logo_wanted)
+            if logo_wanted:
+                logo_cache.request_sync()
+
+        if changed or skip_changed or logo_changed:
             messages.success(request, 'Settings saved.')
         else:
             messages.info(request, 'Nothing changed.')
@@ -357,6 +376,11 @@ def settings_page(request):
                               ' in the background - see the Dashboard for progress.')
             if busy:
                 messages.warning(request, ' and '.join(t.upper() for t in busy) + ' is already being updated.')
+        elif action == 'logos':
+            if logo_cache.request_sync():
+                messages.info(request, 'Checking and downloading logos of ticked channels in the background.')
+            else:
+                messages.warning(request, 'The local logo cache is switched off.')
         elif action == 'reprocess':
             if iptv_updater.start_in_background('m3u', download=False):
                 messages.info(request, 'Re-processing the stored playlist in the background (no download).')
@@ -367,3 +391,28 @@ def settings_page(request):
         return redirect('/settings')
 
     return render(request, 'iptv_filter/settings.html', _settings_context())
+
+
+# ---------------------------------------------
+# Locally cached channel logos (see iptv_filter/logo_cache.py).
+
+def logo_file(request, name):
+    h = name.split('.', 1)[0]
+    if not logo_cache.valid_hash(h):
+        raise Http404()
+    row = LogoCache.objects.filter(url_hash=h, status=LogoCache.OK).first()
+    path = logo_cache.file_path(h)
+    if row is None or not os.path.isfile(path):
+        raise Http404()
+
+    etag = f'"{h}-{int(row.fetched_at.timestamp()) if row.fetched_at else 0}"'
+    if request.headers.get('If-None-Match') == etag:
+        response = HttpResponseNotModified()
+    else:
+        response = FileResponse(open(path, 'rb'), content_type=row.content_type or 'application/octet-stream')
+    response['ETag'] = etag
+    response['Cache-Control'] = 'public, max-age=2592000'
+    # Files come from third parties: never let a browser run them as a page (e.g. an SVG with script).
+    response['X-Content-Type-Options'] = 'nosniff'
+    response['Content-Security-Policy'] = "default-src 'none'; style-src 'unsafe-inline'; sandbox"
+    return response

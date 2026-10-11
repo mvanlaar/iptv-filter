@@ -6,6 +6,7 @@ urlpatterns = [
     path('', views.index, name='index'),
     path('dashboard', views.dashboard, name='dashboard'),
     path('favicon.ico', views.favicon, name='favicon'),
+    path('logo/<str:name>', views.logo_file, name='logo_file'),
     path('m3u', views.m3u_api, name='m3u_api'),
     path('epg', views.epg_api, name='epg_api'),
     path('settings', views.settings_page, name='settings'),

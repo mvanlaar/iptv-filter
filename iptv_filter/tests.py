@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import xml.etree.ElementTree as ET
 
@@ -667,3 +668,243 @@ class SchemaTests(TestCase):
         self.assertTrue(ch.included)             # user's tick survives an update
         self.assertEqual(ch.first_seen, first_seen)  # first_seen is not reset
         self.assertGreaterEqual(ch.last_updated, first_seen)
+
+
+import tempfile
+from datetime import timedelta
+from unittest import mock
+
+from iptv_filter import logo_cache
+from iptv_filter.models import LogoCache
+
+PNG = b'\x89PNG\r\n\x1a\n' + b'x' * 200
+
+
+class LogoCacheTests(TestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path.startswith('/ok'):
+                    self._send(200, 'image/png', PNG)
+                elif self.path.startswith('/octet'):
+                    self._send(200, 'application/octet-stream', PNG)   # type only detectable by content
+                elif self.path.startswith('/big'):
+                    self._send(200, 'image/png', b'\x89PNG' + b'x' * (3 * 1024 * 1024))
+                elif self.path.startswith('/html'):
+                    self._send(200, 'text/html', b'<html>nope</html>')
+                elif self.path.startswith('/redir'):
+                    self.send_response(302); self.send_header('Location', '/ok2.png'); self.send_header('Content-Length', '0'); self.end_headers()
+                else:
+                    self._send(404, 'text/plain', b'no')
+
+            def _send(self, code, ctype, body):
+                self.send_response(code)
+                self.send_header('Content-Type', ctype)
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+
+        cls.server = HTTPServer(('127.0.0.1', 0), Handler)
+        cls.base = f'http://127.0.0.1:{cls.server.server_address[1]}'
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        super().tearDownClass()
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        env = mock.patch.dict('os.environ', {'IPTV_LOGO_DIR': self.tmp.name, 'IPTV_LOGO_ALLOW_PRIVATE': '1',
+                                             'IPTV_LOGO_CACHE': '', 'IPTV_SAFE_START': '1'})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def _channel(self, name, logo, included=True):
+        now = timezone.now()
+        return PlaylistChannel.objects.create(tvg_name=name, tvg_id=name, tvg_logo=logo, group_title='G',
+                                              stream_url=f'http://s/{name}', last_updated=now, first_seen=now, included=included)
+
+    def _m3u(self):
+        return Client().get('/m3u', HTTP_HOST='kodi.lan:8000').content.decode()
+
+    def test_only_ticked_channels_logos_are_downloaded(self):
+        self._channel('A', f'{self.base}/ok-a.png')
+        self._channel('B', f'{self.base}/ok-b.png', included=False)
+        stats = logo_cache.sync()
+        self.assertEqual((stats['selected'], stats['downloaded']), (1, 1))
+        self.assertEqual(LogoCache.objects.count(), 1)
+        self.assertTrue(os.path.exists(logo_cache.file_path(logo_cache.logo_hash(f'{self.base}/ok-a.png'))))
+
+    def test_m3u_points_at_local_cache_once_cached(self):
+        url = f'{self.base}/ok-a.png'
+        self._channel('A', url)
+        self.assertIn(f'tvg-logo="{url}"', self._m3u())            # not cached yet: original URL
+        logo_cache.sync()
+        h = logo_cache.logo_hash(url)
+        out = self._m3u()
+        self.assertIn(f'tvg-logo="http://kodi.lan:8000/logo/{h}.png"', out)
+        self.assertNotIn(url, out)
+
+    def test_uncached_logo_keeps_original_url_even_when_others_are_cached(self):
+        self._channel('A', f'{self.base}/ok-a.png')
+        self._channel('B', f'{self.base}/html-b.png')              # not an image -> fails
+        logo_cache.sync()
+        out = self._m3u()
+        self.assertIn('/logo/', out)
+        self.assertIn(f'tvg-logo="{self.base}/html-b.png"', out)
+
+    def test_logo_is_served_with_safe_headers_and_etag(self):
+        url = f'{self.base}/ok-a.png'
+        self._channel('A', url)
+        logo_cache.sync()
+        h = logo_cache.logo_hash(url)
+        c = Client()
+        r = c.get(f'/logo/{h}.png')
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(b''.join(r.streaming_content), PNG)
+        self.assertEqual(r['Content-Type'], 'image/png')
+        self.assertEqual(r['X-Content-Type-Options'], 'nosniff')
+        self.assertIn('sandbox', r['Content-Security-Policy'])
+        self.assertIn('max-age', r['Cache-Control'])
+        r2 = c.get(f'/logo/{h}.png', HTTP_IF_NONE_MATCH=r['ETag'])
+        self.assertEqual(r2.status_code, 304)
+
+    def test_logo_view_rejects_unknown_and_malformed_names(self):
+        c = Client()
+        for name in ('0' * 40 + '.png', 'nothex.png', '../../etc/passwd', '..%2f..%2fsecret', 'A' * 40):
+            self.assertEqual(c.get(f'/logo/{name}').status_code, 404, name)
+
+    def test_non_image_is_not_cached_and_retry_is_backed_off(self):
+        url = f'{self.base}/html-x.png'
+        self._channel('A', url)
+        logo_cache.sync()
+        row = LogoCache.objects.get()
+        self.assertEqual((row.status, row.fail_count), ('failed', 1))
+        self.assertGreater(row.next_attempt, timezone.now())
+        self.assertEqual(logo_cache.sync()['attempted'], 0)         # not retried before next_attempt
+        self.assertEqual(Client().get(f'/logo/{row.url_hash}.png').status_code, 404)
+
+    def test_failed_logo_is_retried_when_due(self):
+        url = f'{self.base}/html-x.png'
+        self._channel('A', url)
+        logo_cache.sync()
+        LogoCache.objects.update(next_attempt=timezone.now() - timedelta(minutes=1))
+        self.assertEqual(logo_cache.sync()['attempted'], 1)
+        self.assertEqual(LogoCache.objects.get().fail_count, 2)
+
+    def test_oversized_image_is_rejected(self):
+        self._channel('A', f'{self.base}/big.png')
+        logo_cache.sync()
+        row = LogoCache.objects.get()
+        self.assertEqual(row.status, 'failed')
+        self.assertIn('too large', row.last_error)
+
+    def test_type_is_detected_from_content_when_server_says_octet_stream(self):
+        self._channel('A', f'{self.base}/octet.bin')
+        logo_cache.sync()
+        row = LogoCache.objects.get()
+        self.assertEqual((row.status, row.content_type), ('ok', 'image/png'))
+
+    def test_redirects_are_followed(self):
+        self._channel('A', f'{self.base}/redir')
+        logo_cache.sync()
+        self.assertEqual(LogoCache.objects.get().status, 'ok')
+
+    def test_embedded_data_uri_is_stored_without_download(self):
+        import base64
+        uri = 'data:image/png;base64,' + base64.b64encode(PNG).decode()
+        self._channel('A', uri)
+        logo_cache.sync()
+        self.assertEqual(LogoCache.objects.get().status, 'ok')
+        self.assertNotIn('data:image', self._m3u())                 # the huge inline logo became a short URL
+
+    def test_unused_logos_are_purged_after_30_days(self):
+        ch = self._channel('A', f'{self.base}/ok-a.png')
+        logo_cache.sync()
+        row = LogoCache.objects.get()
+        path = logo_cache.file_path(row.url_hash)
+        ch.included = False
+        ch.save()
+        logo_cache.sync()
+        self.assertTrue(os.path.exists(path))                       # kept for a while after unticking
+        LogoCache.objects.update(last_selected=timezone.now() - timedelta(days=31))
+        logo_cache.sync()
+        self.assertFalse(os.path.exists(path))
+        self.assertEqual(LogoCache.objects.count(), 0)
+
+    def test_switch_off_restores_original_urls(self):
+        from iptv_filter import settings_store
+        url = f'{self.base}/ok-a.png'
+        self._channel('A', url)
+        logo_cache.sync()
+        self.assertIn('/logo/', self._m3u())
+        settings_store.set_gui_logo_cache(False)
+        self.assertIn(f'tvg-logo="{url}"', self._m3u())
+
+    def test_settings_page_toggles_cache_and_shows_stats(self):
+        from iptv_filter import settings_store
+        c = Client()
+        c.post('/settings', {'m3u_url': '', 'epg_url': '', 'action': 'save'})   # checkbox absent = off
+        self.assertEqual(settings_store.get_logo_cache(), (False, 'gui'))
+        c.post('/settings', {'m3u_url': '', 'epg_url': '', 'logo_cache': 'on', 'action': 'save'})
+        self.assertEqual(settings_store.get_logo_cache(), (True, 'gui'))
+        self.assertContains(c.get('/settings'), 'cached (')
+        self.assertContains(c.get('/dashboard'), 'Logo cache')
+
+    def test_env_can_disable_and_gui_wins(self):
+        from iptv_filter import settings_store
+        with mock.patch.dict('os.environ', {'IPTV_LOGO_CACHE': '0'}):
+            self.assertEqual(settings_store.get_logo_cache(), (False, 'env'))
+            settings_store.set_gui_logo_cache(True)
+            self.assertEqual(settings_store.get_logo_cache(), (True, 'gui'))
+
+    def test_request_sync_is_inert_in_safe_mode(self):
+        self.assertFalse(logo_cache.request_sync())
+
+    def test_ticking_a_channel_asks_for_a_sync(self):
+        ch = self._channel('A', f'{self.base}/ok-a.png', included=False)
+        with mock.patch.object(logo_cache, 'request_sync') as m:
+            Client().post(f'/channels/{ch.pk}', data=json.dumps({'included': True}), content_type='application/json')
+        m.assert_called()
+
+
+class LogoSafetyTests(TestCase):
+    """The app downloads URLs from a playlist; it must not be usable to reach
+    the local machine or private network."""
+
+    def test_blocks_private_loopback_linklocal_and_odd_schemes(self):
+        for url in ('http://127.0.0.1/x.png', 'http://localhost/x.png', 'http://10.0.0.5/x.png',
+                    'http://192.168.1.1/x.png', 'http://169.254.169.254/latest/meta-data/',
+                    'http://[::1]/x.png', 'file:///etc/passwd', 'ftp://example.com/x.png', 'gopher://x/'):
+            with self.assertRaises(ValueError, msg=url):
+                logo_cache.check_url_allowed(url)
+
+    def test_allows_public_address(self):
+        with mock.patch('socket.getaddrinfo', return_value=[(2, 1, 6, '', ('93.184.216.34', 80))]):
+            logo_cache.check_url_allowed('http://img.example.com/x.png')   # no exception
+
+    def test_hostname_resolving_to_private_address_is_blocked(self):
+        with mock.patch('socket.getaddrinfo', return_value=[(2, 1, 6, '', ('10.1.2.3', 80))]):
+            with self.assertRaises(ValueError):
+                logo_cache.check_url_allowed('http://looks-public.example.com/x.png')
+
+    def test_private_logo_url_is_recorded_as_failed_not_fetched(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict('os.environ', {'IPTV_LOGO_DIR': d, 'IPTV_LOGO_ALLOW_PRIVATE': ''}):
+            now = timezone.now()
+            PlaylistChannel.objects.create(tvg_name='A', tvg_id='a', tvg_logo='http://127.0.0.1:9/x.png', group_title='G',
+                                           stream_url='http://s/1', last_updated=now, first_seen=now, included=True)
+            with mock.patch('requests.get') as get:
+                logo_cache.sync()
+            get.assert_not_called()
+            self.assertIn('non-public', LogoCache.objects.get().last_error)

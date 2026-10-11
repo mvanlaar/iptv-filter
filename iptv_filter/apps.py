@@ -27,6 +27,8 @@ class IptvFilterConfig(AppConfig):
         # and log it. See iptv_filter/settings_store.py.
         from . import settings_store
         settings_store.apply_at_startup()
+        from . import logo_cache
+        logo_cache.request_sync()  # pick up anything ticked but not cached yet
 
         # daemon=True so these threads never block the process from exiting
         # cleanly (e.g. on `docker stop`) - without it, Python won't exit

@@ -76,6 +76,20 @@
 </div>
 
 <div class="card mb-4">
+    <div class="card-header"><h3 class="card-title"><i class="bi bi-image me-1"></i> Logo cache</h3></div>
+    <div class="card-body">
+        {% if logo_enabled %}
+        <span class="badge text-bg-success">on</span>
+        {{ logo_stats.ok }} logos cached ({{ logo_stats.bytes|filesizeformat }}),
+        {{ logo_stats.pending }} waiting, {{ logo_stats.failed }} failed.
+        {% if logo_stats.running %}<span class="badge text-bg-info"><i class="bi bi-hourglass-split"></i> downloading&hellip;</span>{% endif %}
+        {% else %}
+        <span class="badge text-bg-secondary">off</span> the M3U uses the original logo URLs.
+        {% endif %}
+    </div>
+</div>
+
+<div class="card mb-4">
     <div class="card-header"><h3 class="card-title"><i class="bi bi-link-45deg me-1"></i> Point your IPTV player at</h3></div>
     <div class="card-body">
         {% for item in output_urls %}

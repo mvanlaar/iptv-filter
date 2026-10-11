@@ -10,7 +10,7 @@ from datetime import timedelta
 import xml.etree.ElementTree as ET
 from django.db import connection, transaction
 from django.utils import timezone
-from iptv_filter import settings_store
+from iptv_filter import settings_store, logo_cache
 from iptv_filter.models import AppConfig, CachedFile, PlaylistChannel, EpgChannel, EpgProgramme
 
 # import the logging library / Get an instance of a logger
@@ -74,6 +74,9 @@ def _run(filetype, download):
                 logger.warning(f"Skipping {filetype} table update because retrieval failed.")
         else:
             _update_tables(filetype)
+        if filetype == 'm3u':
+            # The selection may have new/changed logos: refresh the local cache.
+            logo_cache.request_sync()
 
 def update_m3u():
     _run('m3u', download=True)

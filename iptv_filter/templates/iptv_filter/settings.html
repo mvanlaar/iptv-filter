@@ -78,10 +78,38 @@
         </div>
     </div>
 
+    <div class="card mb-4">
+        <div class="card-header">
+            <h3 class="card-title"><i class="bi bi-image me-1"></i> Logos</h3>
+            <div class="card-tools">
+                {% if logo_cache_source == 'gui' %}<span class="badge text-bg-primary">saved in the GUI</span>
+                {% elif logo_cache_source == 'env' %}<span class="badge text-bg-secondary">from IPTV_LOGO_CACHE</span>
+                {% else %}<span class="badge text-bg-secondary">default</span>{% endif %}
+            </div>
+        </div>
+        <div class="card-body">
+            <div class="form-check form-switch">
+                <input class="form-check-input" type="checkbox" role="switch" id="logo_cache" name="logo_cache" {% if logo_cache %}checked{% endif %}>
+                <label class="form-check-label" for="logo_cache">Cache logos of ticked channels on this server</label>
+            </div>
+            <div class="form-text">
+                The logos of the channels you tick are downloaded once, in the background, and the M3U then points to this
+                server instead of the provider's image host, so players such as Kodi load them quickly. Logos that are not
+                cached yet keep their original URL.
+            </div>
+            <div class="mt-3 small text-body-secondary">
+                {{ logo_stats.ok }} cached ({{ logo_stats.bytes|filesizeformat }}),
+                {{ logo_stats.pending }} waiting, {{ logo_stats.failed }} failed.
+                {% if logo_stats.running %}<span class="badge text-bg-info"><i class="bi bi-hourglass-split"></i> downloading&hellip;</span>{% endif %}
+            </div>
+        </div>
+    </div>
+
     <div class="mb-4">
         <button type="submit" name="action" value="save" class="btn btn-primary"><i class="bi bi-save me-1"></i> Save</button>
         <button type="submit" name="action" value="fetch" class="btn btn-outline-primary"><i class="bi bi-cloud-download me-1"></i> Save &amp; fetch now</button>
         <button type="submit" name="action" value="reprocess" class="btn btn-outline-primary"><i class="bi bi-arrow-repeat me-1"></i> Save &amp; re-process playlist</button>
+        <button type="submit" name="action" value="logos" class="btn btn-outline-primary"><i class="bi bi-image me-1"></i> Save &amp; refresh logos</button>
     </div>
 </form>
 {% endblock %}

@@ -89,6 +89,18 @@ Credentials in URLs are always masked in the log.
 
 The pages share one layout ([AdminLTE](https://github.com/ColorlibHQ/AdminLTE) / Bootstrap 5) with a sidebar, and a light / dark / auto theme switch in the top bar. All front-end libraries (AdminLTE, Bootstrap, Bootstrap Icons, ag-grid, axios) are bundled under `iptv_filter/static/vendor/` and served locally, so the UI works without internet access. Versions: AdminLTE 4.10.0, Bootstrap 5.3.8, Bootstrap Icons 1.13.2, ag-grid-community 36.1.0, axios 1.20.0.
 
+# Logo cache
+
+Players such as Kodi download every `tvg-logo` themselves from the provider's image host, which is slow on first load. This app can instead cache the logos **of the channels you have ticked** and serve them itself:
+
+* Logos are downloaded once, in the background (after the daily M3U refresh, after you save groups, and shortly after you tick channels), into `logo_cache/` next to the database.
+* `/m3u` then points `tvg-logo` at `http://<the host your player used>/logo/<hash>.png` - but only for logos that are actually cached. Anything not cached yet keeps its original URL, so a player never gets a dead link.
+* Logos nobody has used for 30 days are deleted; failed downloads are retried after 1 h, 6 h, then every 24 h.
+* The app only downloads `http`/`https` images up to 2 MB, and refuses addresses on private networks (so a playlist can't make it probe your LAN).
+* Switch it on or off on the **Settings** page (a saved value wins over the environment). Status is shown on the Dashboard.
+
+Environment variables (all optional): `IPTV_LOGO_CACHE=0` (disable by default), `IPTV_LOGO_DIR` (cache folder), `IPTV_LOGO_ALLOW_PRIVATE=1` (allow logo hosts on private/LAN addresses). In Docker, mount a volume on `/code/logo_cache` to keep the cache when the container is recreated; otherwise it simply refills.
+
 # Scheduled retrieval
 
 * When launched, the application will pull the latest m3u and epg files. Depending on your host this could take over 20 minutes.

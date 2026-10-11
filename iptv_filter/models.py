@@ -47,9 +47,14 @@ class PlaylistChannel(models.Model):
         ]
 
     def __str__(self):
+        return self.to_m3u()
+
+    def to_m3u(self, logo_override=None):
+        """The #EXTINF + URL lines for this channel. logo_override replaces the
+        stored logo URL (used to point at the local logo cache)."""
         tvg_id = _m3u_safe(self.tvg_id)
         tvg_name = _m3u_safe(self.tvg_name)
-        tvg_logo = _m3u_safe(self.tvg_logo)
+        tvg_logo = _m3u_safe(self.tvg_logo if logo_override is None else logo_override)
         group_title = _m3u_safe(self.group_title)
         stream_url = _m3u_safe(self.stream_url)
         text = f"#EXTINF:-1 tvg-id=\"{tvg_id}\" tvg-name=\"{tvg_name}\" tvg-logo=\"{tvg_logo}\" group-title=\"{group_title}\",{tvg_name}\r\n"
@@ -90,3 +95,19 @@ class CachedFile(models.Model):
     file_type = models.TextField(max_length=5)
     file = models.BinaryField()
     last_updated = models.DateTimeField(null=True,blank=True, db_index=True)
+
+
+class LogoCache(models.Model):
+    """One row per distinct logo URL used by a ticked channel. The image itself
+    lives on disk (see iptv_filter/logo_cache.py); this tracks its state."""
+    PENDING, OK, FAILED = 'pending', 'ok', 'failed'
+    url_hash = models.CharField(max_length=40, unique=True)  # sha1 of the url
+    url = models.TextField()
+    status = models.CharField(max_length=10, default='pending', db_index=True)
+    content_type = models.CharField(max_length=60, blank=True, default='')
+    size = models.IntegerField(default=0)
+    fetched_at = models.DateTimeField(null=True, blank=True)
+    next_attempt = models.DateTimeField(null=True, blank=True)
+    fail_count = models.IntegerField(default=0)
+    last_error = models.CharField(max_length=200, blank=True, default='')
+    last_selected = models.DateTimeField(null=True, blank=True)  # last time a ticked channel used it
