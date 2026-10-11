@@ -4,4 +4,4 @@
 # if os.environ.get('RUN_MAIN', None) != 'true':
 #     default_app_config = 'iptv_filter.apps.IptvFilterConfig'
 
-__version__ = "1.0.0"
+__version__ = "2.1.0"
