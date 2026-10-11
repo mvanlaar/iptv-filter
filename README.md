@@ -37,6 +37,8 @@ Run the container: `docker-compose up`
 * `export IPTV_M3U_URL="<your_m3u_url>"`
 * `export IPTV_EPG_URL="<your_epg_url>"`
 * `export TZ="Europe/Amsterdam"` (optional - controls how times are displayed, e.g. in the admin site and the `runserver` startup banner; defaults to `Europe/Amsterdam` if not set)
+* `export IPTV_USER_AGENT="..."` (optional - the User-Agent sent when downloading; defaults to a browser-like one because many IPTV panels reset connections from `python-requests`)
+* `export IPTV_READ_TIMEOUT=300` (optional - seconds to wait for the provider to start/continue sending; raise it if your provider is slow to generate the playlist)
 * `python3 manage.py runserver 0:8000 --noreload` (this is what `./run.sh` does)
 
 #### Upgrading
