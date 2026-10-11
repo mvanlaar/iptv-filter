@@ -1,3 +1,4 @@
+import os
 import requests
 import re
 import time
@@ -80,6 +81,37 @@ def update_epg_scheduled():
             _record_error('epg', str(e))
 
 
+# Many IPTV providers (Xtream-codes panels in particular) reset the connection
+# for the default "python-requests/x.y" User-Agent. Send a browser-like one
+# instead; override with IPTV_USER_AGENT if a provider wants something else.
+DEFAULT_USER_AGENT = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36'
+
+# (connect, read) timeouts. The read timeout is per-chunk / time-to-first-byte,
+# not total: providers often take minutes to generate a big playlist.
+CONNECT_TIMEOUT = 10
+READ_TIMEOUT = int(os.environ.get('IPTV_READ_TIMEOUT') or 300)
+
+_url_userinfo = re.compile(r'(?i)(://)[^/@\s]*@')
+_url_secret_param = re.compile(r'(?i)([?&](?:password|pass|pwd|token|key|secret)=)[^&\s]*')
+_url_user_param = re.compile(r'(?i)([?&]username=)[^&\s]*')
+
+def _mask(text):
+    """Strip credentials (user:pass@host and ?username=/password=/token=) from
+    URLs so they don't end up in logs or the /status output."""
+    text = _url_userinfo.sub(r'\1***@', str(text))
+    text = _url_secret_param.sub(r'\1***', text)
+    return _url_user_param.sub(r'\1***', text)
+
+def _decode(r):
+    # r.text runs charset detection (chardet) over the whole body when the
+    # server doesn't declare one, which is very slow on 30+ MB files.
+    if r.encoding is None:
+        try:
+            return r.content.decode('utf-8')
+        except UnicodeDecodeError:
+            return r.content.decode('latin-1')
+    return r.text
+
 # "m3u" and "epg" for now...
 def _retrieve(filetype):
     configs = AppConfig.objects.filter(key=filetype+"_url")
@@ -87,22 +119,27 @@ def _retrieve(filetype):
         logger.warning(f"No {filetype} URL configured yet (set IPTV_{filetype.upper()}_URL or configure it) - skipping retrieval.")
         return False
     url = configs[0].value
+    safe_url = _mask(url)
 
-    logging.info(f"Retrieving fresh {filetype} file from {url}")
+    logger.info(f"Retrieving fresh {filetype} file from {safe_url}")
 
+    headers = {'User-Agent': os.environ.get('IPTV_USER_AGENT') or DEFAULT_USER_AGENT}
+    started = time.monotonic()
     try:
-        r = requests.get(url, timeout=30)
+        r = requests.get(url, headers=headers, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT))
         r.raise_for_status()
     except requests.exceptions.RequestException as e:
         # Covers connection errors (DNS failures, refused connections, timeouts)
         # and non-2xx responses (raise_for_status) without crashing the caller.
-        logger.warning(f"Failed to retrieve {filetype} file from {url}: {e}")
-        _record_error(filetype, str(e))
+        msg = _mask(e)
+        logger.warning(f"Failed to retrieve {filetype} file from {safe_url}: {msg}")
+        _record_error(filetype, msg)
         return False
 
+    data = _decode(r).encode()
     now = timezone.now()
-    CachedFile.objects.update_or_create(file_type=filetype, defaults={'file':r.text.encode(), 'last_updated':now})
-    logging.info(f"Received fresh {filetype} file, size {len(r.text.encode())}")
+    CachedFile.objects.update_or_create(file_type=filetype, defaults={'file':data, 'last_updated':now})
+    logger.info(f"Received fresh {filetype} file, size {len(data)} in {time.monotonic()-started:.1f}s")
     _last_error.pop(filetype, None)
     return True
 
