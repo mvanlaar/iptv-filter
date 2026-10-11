@@ -1,10 +1,60 @@
 # iptv-filter
 
+A self-hosted web app that sits between your IPTV provider and your player (built with Kodi's IPTV Simple client in mind). It downloads the provider's huge M3U playlist and EPG guide, lets you pick just the groups and channels you want, and serves a small, clean `/m3u` and `/epg` for your player.
+
 I was sick of trying to parse through 13000+ "Channels" on an IPTV service so I decided to write this and share it.
 I've never used Django before (and I'm a python beginner) so I'm sure there is improvement available in the codebase.
 
+> Intended for use on your own network (LAN). There is no login, so don't expose it to the internet.
+
+## Features
+
+* Handles playlists of over a million entries (SQLite, imports in a few minutes)
+* Select by **group** with a drill-down to single channels, or search channels directly
+* `/m3u` and `/epg` contain only what you ticked, and update immediately
+* **EPG coverage** report: which ticked channels get no guide, and why
+* Automatic fix for ids that differ only in letter case, plus **manual matching** with typeahead
+* Mark channels as **radio** (`radio="true"`) so Kodi lists them under Radio
+* Local **logo cache** for faster loading in your player
+* Optionally skip movies/series (VOD) on import
+* Settings in the browser or via environment variables; light/dark theme; all assets bundled (works offline)
+
+## Screenshots
+
+### Dashboard
+Health, last fetch times, EPG coverage, logo cache and copy-ready URLs for your player.
+
+![Dashboard](docs/screenshots/dashboard.png)
+
+### Groups
+Tick a whole group, or open it to tick single channels. Filter within a group, and mark channels as radio. Everything saves immediately.
+
+![Groups](docs/screenshots/groups-channels.png)
+
+### Channels
+Search and tick individual channels.
+
+![Channels](docs/screenshots/channels.png)
+
+### EPG coverage
+See which ticked channels have no guide data and why. Pick the right guide channel by typing part of its name, or mark a channel as having no guide.
+
+![EPG coverage](docs/screenshots/coverage.png)
+
+![EPG typeahead](docs/screenshots/coverage-typeahead.png)
+
+### Settings
+Set the M3U and EPG URLs, skip movies/series, and switch the logo cache on or off.
+
+![Settings](docs/screenshots/settings.png)
+
+*(The screenshots use a fictional demo playlist.)*
+
 # Concept
 This application pulls an m3u file and an epg file and stores their components in a database; users tag the groups they wish to subscribe to within that subset and the app serves up an m3u file on the fly composed of the segments that are included.
+
+# Kodi quick setup
+In Kodi: *Add-ons > PVR IPTV Simple Client > Configure*, then set the playlist location to *Remote path* `http://<host>:8000/m3u` and the XMLTV location to `http://<host>:8000/epg`. Channel logos come from this app's cache when enabled.
 
 # Launching iptv-filter
 There are two options for running this: Docker, and Plain Python.
