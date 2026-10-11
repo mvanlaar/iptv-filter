@@ -327,10 +327,66 @@ class RetrieveTests(TestCase):
         self.assertNotIn('abc', m('http://h/get.php?username=bob&password=abc&type=m3u'))
         self.assertIn('type=m3u', m('http://h/get.php?username=bob&password=abc&type=m3u'))
 
-    def test_decode_without_charset_is_utf8(self):
-        class R:
-            encoding = None
-            content = 'Café'.encode()
-        self.assertEqual(iptv_updater._decode(R), 'Café')
-        R.content = 'Café'.encode('latin-1')
-        self.assertEqual(iptv_updater._decode(R), 'Café')
+    def test_body_stored_as_raw_bytes(self):
+        AppConfig.objects.update_or_create(key='m3u_url', defaults={'value': self._url()})
+        self.assertTrue(iptv_updater._retrieve('m3u'))
+        self.assertEqual(bytes(CachedFile.objects.get(file_type='m3u').file),
+                         b'#EXTM3U\n#EXTINF:-1 tvg-name="A" group-title="G",A\nhttp://s/1\n')
+
+
+class LargeUpdateTests(TestCase):
+    """M3U updates are applied in batches (not one giant transaction) so a big
+    playlist can't lock the database for the web UI."""
+
+    def _m3u(self, n, vod=0):
+        lines = ['#EXTM3U']
+        for i in range(n):
+            lines.append(f'#EXTINF:-1 tvg-name="Live {i}" group-title="L",Live {i}')
+            lines.append(f'http://h:80/user/pass/{i}')
+        for i in range(vod):
+            lines.append(f'#EXTINF:-1 tvg-name="Movie {i}" group-title="M",Movie {i}')
+            lines.append(f'http://h:80/movie/user/pass/{i}.mp4')
+        lines.append('#EXTINF:-1 tvg-name="Show" group-title="S",Show')
+        lines.append('http://h:80/series/user/pass/1.mkv')
+        return '\n'.join(lines) + '\n'
+
+    def test_batched_create_update_delete(self):
+        orig = iptv_updater.WRITE_BATCH
+        iptv_updater.WRITE_BATCH = 7  # force several batches
+        try:
+            _seed_cached_file('m3u', self._m3u(50))
+            iptv_updater._update_tables('m3u')
+            self.assertEqual(PlaylistChannel.objects.count(), 51)
+            # drop 20 live channels, change one stream URL
+            _seed_cached_file('m3u', self._m3u(30).replace('/user/pass/3\n', '/user/pass/NEW\n'))
+            iptv_updater._update_tables('m3u')
+            self.assertEqual(PlaylistChannel.objects.count(), 31)
+            self.assertEqual(PlaylistChannel.objects.get(tvg_name='Live 3').stream_url, 'http://h:80/user/pass/NEW')
+        finally:
+            iptv_updater.WRITE_BATCH = orig
+
+    def test_skip_vod_is_opt_in(self):
+        from unittest import mock
+        _seed_cached_file('m3u', self._m3u(5, vod=5))
+        iptv_updater._update_tables('m3u')
+        self.assertEqual(PlaylistChannel.objects.count(), 11)  # default: keep everything
+        PlaylistChannel.objects.all().delete()
+        with mock.patch.dict('os.environ', {'IPTV_SKIP_VOD': '1'}):
+            iptv_updater._update_tables('m3u')
+        self.assertEqual(PlaylistChannel.objects.count(), 5)
+        self.assertFalse(PlaylistChannel.objects.filter(stream_url__contains='/movie/').exists())
+
+    def test_non_utf8_bytes_do_not_crash(self):
+        CachedFile.objects.update_or_create(file_type='m3u', defaults={
+            'file': b'#EXTM3U\n#EXTINF:-1 tvg-name="Caf\xe9" group-title="G",Caf\xe9\nhttp://s/1\n',
+            'last_updated': timezone.now()})
+        iptv_updater._update_tables('m3u')
+        self.assertEqual(PlaylistChannel.objects.count(), 1)
+
+    def test_channels_api_survives_busy_database(self):
+        from unittest import mock
+        from django.db import OperationalError
+        with mock.patch.object(AppConfig.objects, 'update_or_create', side_effect=OperationalError('database is locked')):
+            r = Client().get('/channels')
+        self.assertEqual(r.status_code, 200)
+        b''.join(r.streaming_content)
