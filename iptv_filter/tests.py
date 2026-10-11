@@ -390,3 +390,66 @@ class LargeUpdateTests(TestCase):
             r = Client().get('/channels')
         self.assertEqual(r.status_code, 200)
         b''.join(r.streaming_content)
+
+
+class UiTests(TestCase):
+    """The AdminLTE-based pages: shared layout, dashboard, bundled assets."""
+
+    def test_pages_render_with_shared_layout(self):
+        for url in ('/', '/dashboard', '/configure'):
+            r = Client().get(url)
+            self.assertEqual(r.status_code, 200, url)
+            body = r.content.decode()
+            self.assertIn('app-sidebar', body, url)
+            self.assertIn('/static/vendor/adminlte/adminlte.min.css', body, url)
+            self.assertIn('iptv-filter v', body, url)
+
+    def test_active_nav_item_is_highlighted(self):
+        body = Client().get('/configure').content.decode()
+        self.assertRegex(body, r'href="/configure" class="nav-link active"')
+        self.assertNotRegex(body, r'href="/" class="nav-link active"')
+
+    def test_bundled_assets_exist_and_no_external_cdn(self):
+        import re
+        from django.contrib.staticfiles import finders
+        for url in ('/', '/dashboard', '/configure'):
+            body = Client().get(url).content.decode()
+            self.assertNotIn('cdn.jsdelivr.net', body)
+            for path in re.findall(r'/static/(vendor/[^"\']+)', body):
+                self.assertIsNotNone(finders.find(path), f'{path} missing (referenced by {url})')
+
+    def test_dashboard_shows_counts_and_masked_error(self):
+        now = timezone.now()
+        PlaylistChannel.objects.create(tvg_name='A', tvg_id='a', group_title='G', stream_url='http://s/1',
+                                       last_updated=now, first_seen=now, included=True)
+        PlaylistChannel.objects.create(tvg_name='B', tvg_id='b', group_title='G', stream_url='http://s/2',
+                                       last_updated=now, first_seen=now, included=False)
+        iptv_updater._record_error('epg', 'boom <script>alert(1)</script>')
+        try:
+            body = Client().get('/dashboard').content.decode()
+        finally:
+            iptv_updater._last_error.pop('epg', None)
+        self.assertIn('Not ready yet', body)
+        self.assertRegex(body, r'1 <small[^>]*>/ 2</small>')
+        self.assertIn('boom', body)
+        self.assertNotIn('<script>alert(1)</script>', body)  # escaped
+
+    def test_dashboard_output_urls_use_request_host(self):
+        body = Client().get('/dashboard', HTTP_HOST='tv.lan:8000').content.decode()
+        self.assertIn('http://tv.lan:8000/m3u', body)
+        self.assertIn('http://tv.lan:8000/epg', body)
+
+    def test_channels_page_sets_csrf_cookie(self):
+        # The grid POSTs toggles with a token read from this cookie.
+        r = Client().get('/')
+        self.assertIn('csrftoken', r.cookies)
+
+    def test_group_save_redirects_back_with_confirmation(self):
+        now = timezone.now()
+        PlaylistChannel.objects.create(tvg_name='A', tvg_id='a', group_title='G1', stream_url='http://s/1',
+                                       last_updated=now, first_seen=now)
+        r = Client().post('/configure', {'G1': 'G1'})
+        self.assertEqual(r.status_code, 302)
+        self.assertTrue(r['Location'].startswith('/configure?saved='))
+        self.assertTrue(PlaylistChannel.objects.get(tvg_name='A').included)
+        self.assertIn('Groups saved', Client().get(r['Location']).content.decode())

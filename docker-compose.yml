@@ -7,5 +7,8 @@ services:
       - IPTV_M3U_URL=
       - IPTV_EPG_URL=
       - TZ=
+      # - IPTV_USER_AGENT=
+      # - IPTV_READ_TIMEOUT=300
+      # - IPTV_SKIP_VOD=1
     ports:
       - "8000:8000"

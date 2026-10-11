@@ -1,0 +1,115 @@
+{% extends "iptv_filter/base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block heading %}Dashboard{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-12 col-sm-6 col-lg-3">
+        <div class="info-box">
+            <span class="info-box-icon text-bg-{% if status.healthy %}success{% else %}warning{% endif %} shadow-sm">
+                <i class="bi bi-{% if status.healthy %}check-lg{% else %}exclamation-lg{% endif %}"></i>
+            </span>
+            <div class="info-box-content">
+                <span class="info-box-text">Status</span>
+                <span class="info-box-number">{% if status.healthy %}Healthy{% else %}Not ready yet{% endif %}</span>
+            </div>
+        </div>
+    </div>
+    <div class="col-12 col-sm-6 col-lg-3">
+        <div class="info-box">
+            <span class="info-box-icon text-bg-primary shadow-sm"><i class="bi bi-tv"></i></span>
+            <div class="info-box-content">
+                <span class="info-box-text">Channels included</span>
+                <span class="info-box-number">{{ status.m3u.included_channel_count }} <small class="text-body-secondary">/ {{ status.m3u.channel_count }}</small></span>
+            </div>
+        </div>
+    </div>
+    <div class="col-12 col-sm-6 col-lg-3">
+        <div class="info-box">
+            <span class="info-box-icon text-bg-info shadow-sm"><i class="bi bi-broadcast"></i></span>
+            <div class="info-box-content">
+                <span class="info-box-text">EPG channels included</span>
+                <span class="info-box-number">{{ status.epg.included_channel_count }} <small class="text-body-secondary">/ {{ status.epg.channel_count }}</small></span>
+            </div>
+        </div>
+    </div>
+    <div class="col-12 col-sm-6 col-lg-3">
+        <div class="info-box">
+            <span class="info-box-icon text-bg-secondary shadow-sm"><i class="bi bi-calendar-event"></i></span>
+            <div class="info-box-content">
+                <span class="info-box-text">Programmes included</span>
+                <span class="info-box-number">{{ status.epg.included_programme_count }} <small class="text-body-secondary">/ {{ status.epg.programme_count }}</small></span>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    {% for src in sources %}
+    <div class="col-lg-6">
+        <div class="card mb-4">
+            <div class="card-header"><h3 class="card-title"><i class="bi {{ src.icon }} me-1"></i> {{ src.title }}</h3></div>
+            <div class="card-body p-0">
+                <table class="table mb-0">
+                    <tbody>
+                        <tr>
+                            <th class="w-50">URL configured</th>
+                            <td>{% if src.data.url_configured %}<span class="badge text-bg-success">yes</span>{% else %}<span class="badge text-bg-danger">no</span>{% endif %}</td>
+                        </tr>
+                        <tr>
+                            <th>Last successful fetch</th>
+                            <td>{% if src.fetched %}{{ src.fetched|date:"Y-m-d H:i" }}{% else %}<span class="text-body-secondary">never</span>{% endif %}</td>
+                        </tr>
+                    </tbody>
+                </table>
+                {% if src.error %}
+                <div class="alert alert-danger m-3 mb-3">
+                    <i class="bi bi-exclamation-triangle me-1"></i>
+                    <strong>Last error</strong> ({{ src.error.time|date:"Y-m-d H:i" }}):
+                    {{ src.error.message }}
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+
+<div class="card mb-4">
+    <div class="card-header"><h3 class="card-title"><i class="bi bi-link-45deg me-1"></i> Point your IPTV player at</h3></div>
+    <div class="card-body">
+        {% for item in output_urls %}
+        <label class="form-label" for="url-{{ item.key }}">{{ item.label }}</label>
+        <div class="input-group mb-3">
+            <input type="text" class="form-control" id="url-{{ item.key }}" value="{{ item.url }}" readonly>
+            <button class="btn btn-outline-secondary copy-btn" type="button" data-target="url-{{ item.key }}">
+                <i class="bi bi-clipboard"></i> Copy
+            </button>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    document.querySelectorAll('.copy-btn').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            var input = document.getElementById(btn.dataset.target);
+            input.select();
+            input.setSelectionRange(0, input.value.length);
+            var done = function () {
+                btn.innerHTML = '<i class="bi bi-check2"></i> Copied';
+                setTimeout(function () { btn.innerHTML = '<i class="bi bi-clipboard"></i> Copy'; }, 1500);
+            };
+            // navigator.clipboard only exists in secure contexts (https/localhost);
+            // fall back to execCommand for plain-http LAN use.
+            if (navigator.clipboard && window.isSecureContext) {
+                navigator.clipboard.writeText(input.value).then(done);
+            } else {
+                try { document.execCommand('copy'); done(); } catch (e) { }
+            }
+        });
+    });
+</script>
+{% endblock %}

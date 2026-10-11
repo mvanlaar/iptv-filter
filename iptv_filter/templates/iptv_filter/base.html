@@ -1,0 +1,144 @@
+{% load static %}<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}IPTV Filter{% endblock %} &middot; IPTV Filter</title>
+    <link rel="icon" href="/favicon.ico">
+    <script>
+        // Apply the saved/preferred colour theme before first paint (no flash).
+        (function () {
+            var mode = 'auto';
+            try { mode = localStorage.getItem('iptv-theme') || 'auto'; } catch (e) { }
+            var dark = mode === 'dark' || (mode === 'auto' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+            document.documentElement.setAttribute('data-bs-theme', dark ? 'dark' : 'light');
+            document.documentElement.setAttribute('data-ag-theme-mode', dark ? 'dark' : 'light');
+        })();
+    </script>
+    <link rel="stylesheet" href="{% static 'vendor/bootstrap/bootstrap.min.css' %}">
+    <link rel="stylesheet" href="{% static 'vendor/bootstrap-icons/bootstrap-icons.min.css' %}">
+    <link rel="stylesheet" href="{% static 'vendor/adminlte/adminlte.min.css' %}">
+    {% block head %}{% endblock %}
+</head>
+
+<body class="layout-fixed sidebar-expand-lg bg-body-tertiary">
+    <div class="app-wrapper">
+
+        <nav class="app-header navbar navbar-expand bg-body">
+            <div class="container-fluid">
+                <ul class="navbar-nav">
+                    <li class="nav-item">
+                        <a class="nav-link" data-lte-toggle="sidebar" href="#" role="button" aria-label="Toggle menu">
+                            <i class="bi bi-list"></i>
+                        </a>
+                    </li>
+                </ul>
+                <ul class="navbar-nav ms-auto">
+                    <li class="nav-item">
+                        <a class="nav-link" href="#" id="themeToggle" role="button" title="Switch light / dark theme">
+                            <i class="bi bi-circle-half" id="themeIcon"></i>
+                        </a>
+                    </li>
+                </ul>
+            </div>
+        </nav>
+
+        <aside class="app-sidebar bg-body-secondary shadow" data-bs-theme="dark">
+            <div class="sidebar-brand">
+                <a href="/dashboard" class="brand-link">
+                    <i class="bi bi-tv brand-image fs-4 ms-3 me-2"></i>
+                    <span class="brand-text fw-light">IPTV Filter</span>
+                </a>
+            </div>
+            <div class="sidebar-wrapper">
+                <nav class="mt-2">
+                    <ul class="nav sidebar-menu flex-column" role="menu">
+                        <li class="nav-item">
+                            <a href="/dashboard" class="nav-link{% if active_page == 'dashboard' %} active{% endif %}">
+                                <i class="nav-icon bi bi-speedometer2"></i>
+                                <p>Dashboard</p>
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a href="/" class="nav-link{% if active_page == 'index' %} active{% endif %}">
+                                <i class="nav-icon bi bi-list-check"></i>
+                                <p>Channels</p>
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a href="/configure" class="nav-link{% if active_page == 'configure' %} active{% endif %}">
+                                <i class="nav-icon bi bi-collection"></i>
+                                <p>Groups</p>
+                            </a>
+                        </li>
+                        <li class="nav-header">OUTPUT</li>
+                        <li class="nav-item">
+                            <a href="/m3u" class="nav-link" target="_blank" rel="noopener">
+                                <i class="nav-icon bi bi-file-earmark-play"></i>
+                                <p>M3U playlist</p>
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a href="/epg" class="nav-link" target="_blank" rel="noopener">
+                                <i class="nav-icon bi bi-calendar3"></i>
+                                <p>EPG guide</p>
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a href="/status" class="nav-link" target="_blank" rel="noopener">
+                                <i class="nav-icon bi bi-heart-pulse"></i>
+                                <p>Status (JSON)</p>
+                            </a>
+                        </li>
+                    </ul>
+                </nav>
+            </div>
+        </aside>
+
+        <main class="app-main">
+            <div class="app-content-header">
+                <div class="container-fluid">
+                    <h3 class="mb-0">{% block heading %}{% endblock %}</h3>
+                </div>
+            </div>
+            <div class="app-content">
+                <div class="container-fluid">
+                    {% block content %}{% endblock %}
+                </div>
+            </div>
+        </main>
+
+        <footer class="app-footer">
+            <div class="float-end d-none d-sm-inline">iptv-filter v{{ app_version }}</div>
+            <a href="https://github.com/mvanlaar/iptv-filter" class="text-decoration-none" target="_blank" rel="noopener">mvanlaar/iptv-filter</a>
+        </footer>
+    </div>
+
+    <script src="{% static 'vendor/bootstrap/bootstrap.bundle.min.js' %}"></script>
+    <script src="{% static 'vendor/adminlte/adminlte.min.js' %}"></script>
+    <script>
+        // Theme toggle: auto (follow the OS) -> light -> dark -> auto ...
+        (function () {
+            var order = ['auto', 'light', 'dark'];
+            var icons = { auto: 'bi-circle-half', light: 'bi-sun', dark: 'bi-moon-stars' };
+            function current() { try { return localStorage.getItem('iptv-theme') || 'auto'; } catch (e) { return 'auto'; } }
+            function apply(mode) {
+                var dark = mode === 'dark' || (mode === 'auto' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+                document.documentElement.setAttribute('data-bs-theme', dark ? 'dark' : 'light');
+                document.documentElement.setAttribute('data-ag-theme-mode', dark ? 'dark' : 'light');
+                document.getElementById('themeIcon').className = 'bi ' + icons[mode];
+            }
+            apply(current());
+            document.getElementById('themeToggle').addEventListener('click', function (e) {
+                e.preventDefault();
+                var next = order[(order.indexOf(current()) + 1) % order.length];
+                try { localStorage.setItem('iptv-theme', next); } catch (err) { }
+                apply(next);
+            });
+        })();
+    </script>
+    {% block scripts %}{% endblock %}
+</body>
+
+</html>
