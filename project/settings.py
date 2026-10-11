@@ -85,6 +85,12 @@ DATABASES = {
             # readers keep working while a writer is active, and the timeout makes
             # a writer wait for the lock instead of failing at once.
             'timeout': 30,
+            # Take the write lock when a transaction *starts*. With the default
+            # (deferred) mode a transaction that first reads and then writes
+            # fails at once with "database is locked" -- the busy timeout does
+            # not apply -- if anyone else committed in between (e.g. the logo
+            # cache or a page visit while the EPG is being imported).
+            'transaction_mode': 'IMMEDIATE',
             'init_command': 'PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;',
         },
     }

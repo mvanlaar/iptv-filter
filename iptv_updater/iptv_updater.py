@@ -9,7 +9,7 @@ import re
 import time
 from datetime import timedelta
 import xml.etree.ElementTree as ET
-from django.db import connection, transaction
+from django.db import OperationalError, connection, transaction
 from django.utils import timezone
 from iptv_filter import settings_store, logo_cache, epg_quality
 from iptv_filter.models import AppConfig, CachedFile, PlaylistChannel, EpgChannel, EpgProgramme
@@ -217,10 +217,22 @@ def _update_tables(filetype):
     # every other request fail with "database is locked".
     if filetype == 'm3u':
         return _update_tables_impl(filetype)
-    with transaction.atomic():
-        return _update_tables_impl(filetype)
+    # The whole EPG is one transaction. If SQLite still reports the database as
+    # locked (another writer held it past the timeout), nothing was applied, so
+    # simply try again a few times before giving up.
+    for attempt in range(1, EPG_ATTEMPTS + 1):
+        try:
+            with transaction.atomic():
+                return _update_tables_impl(filetype)
+        except OperationalError as e:
+            if 'locked' not in str(e).lower() or attempt == EPG_ATTEMPTS:
+                raise
+            wait = 5 * attempt
+            logger.warning(f"EPG update hit a locked database (attempt {attempt} of {EPG_ATTEMPTS}); retrying in {wait}s.")
+            time.sleep(wait)
 
 WRITE_BATCH = 2000
+EPG_ATTEMPTS = 4
 SKIP_VOD_RE = re.compile(r'(?i)^[a-z]+://[^/]+/(?:[^/]+/)?(?:movie|series)/')
 
 def _update_tables_impl(filetype):

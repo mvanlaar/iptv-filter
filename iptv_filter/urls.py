@@ -10,6 +10,7 @@ urlpatterns = [
     path('m3u', views.m3u_api, name='m3u_api'),
     path('epg', views.epg_api, name='epg_api'),
     path('coverage', views.epg_coverage, name='coverage'),
+    path('coverage/map', views.epg_map_api, name='coverage_map'),
     path('settings', views.settings_page, name='settings'),
     path('configure', views.configure, name='configure'),
     path('channels', views.channel_api, name='channel_api'),

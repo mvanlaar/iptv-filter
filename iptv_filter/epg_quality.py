@@ -18,7 +18,9 @@ from datetime import datetime
 from django.db.models import Count, Max, Min, Q
 from django.utils import timezone
 
-from .models import EpgChannel, EpgProgramme, PlaylistChannel
+from difflib import SequenceMatcher
+
+from .models import EpgChannel, EpgMapping, EpgProgramme, PlaylistChannel
 
 logger = logging.getLogger(__name__)
 
@@ -61,24 +63,41 @@ def names_agree(channel_name, epg_id, epg_display_name=''):
     return False
 
 
+def manual_mappings():
+    """{tvg_name: (epg_id, no_guide)} for the decisions made on the coverage page."""
+    return {n: (e, g) for n, e, g in EpgMapping.objects.values_list('tvg_name', 'epg_id', 'no_guide')}
+
+
 def id_overrides():
-    """Which ticked channels get a corrected tvg-id in the M3U output.
+    """Which ticked channels get a different tvg-id in the M3U output.
 
     Returns (overrides, conflicts). ``overrides`` maps PlaylistChannel pk -> the
-    EPG channel id to write. ``conflicts`` lists channels whose id matches an EPG
-    channel only when case is ignored, but whose name does not fit that EPG
-    channel; those are left alone. Both are empty when the fix is switched off.
+    EPG channel id to write. Two sources, the manual one winning:
+
+    * a mapping you made by hand on the coverage page (any channel, also ones
+      without an id), as long as that EPG channel exists;
+    * the automatic letter-case correction (unless IPTV_FIX_EPG_IDS=0), applied
+      only when the channel name fits the EPG channel.
+
+    ``conflicts`` lists channels whose id matches an EPG channel only when case
+    is ignored, but whose name does not fit; those are left alone.
     """
-    if not fix_enabled():
-        return {}, []
     epg, exact = {}, set()
     for cid, name in EpgChannel.objects.values_list('channel_id', 'display_name'):
         epg.setdefault(cid.lower(), (cid, name))
         exact.add(cid)
+    manual = manual_mappings()
+    auto = fix_enabled()
     overrides, conflicts = {}, []
-    for pk, name, tvg_id, group in (PlaylistChannel.objects.filter(included=True).exclude(tvg_id='')
+    for pk, name, tvg_id, group in (PlaylistChannel.objects.filter(included=True)
                                     .values_list('pk', 'tvg_name', 'tvg_id', 'group_title')):
-        if tvg_id in exact:
+        m = manual.get(name)
+        if m and not m[1] and m[0] in exact:
+            overrides[pk] = m[0]
+            continue
+        if m and m[1]:
+            continue                      # marked "no guide": leave it alone
+        if not auto or not tvg_id or tvg_id in exact:
             continue
         hit = epg.get(tvg_id.lower())
         if not hit:
@@ -89,6 +108,53 @@ def id_overrides():
             conflicts.append({'pk': pk, 'name': name, 'tvg_id': tvg_id, 'group': group, 'epg_id': hit[0],
                               'epg_name': hit[1]})
     return overrides, conflicts
+
+
+def _norm_name(text):
+    """Comparable form of a channel name: lower case, quality tags and
+    generic words dropped, only letters and digits left."""
+    tokens = [t for t in re.split(r'[^a-z0-9]+', (text or '').lower()) if t and t not in _NOISE]
+    return ''.join(tokens)
+
+
+def _digits(text):
+    return re.findall(r'\d+', text)
+
+
+def _is_radio(text):
+    return bool(re.search(r'\b(radio|fm)\b', (text or '').lower()))
+
+
+def suggest(rows, epg_channels, threshold=0.88):
+    """Fill in row['suggest'] = {'epg_id', 'name', 'score'} for rows whose name
+    resembles an EPG channel closely (numbers must be identical). Names are
+    de-duplicated first, so HD/FHD/HEVC variants cost one comparison."""
+    cands = []
+    for cid, disp in epg_channels:
+        keys = {_norm_name(disp), _norm_name(cid.rsplit('.', 1)[0])} - {''}
+        cands.append((cid, disp, keys, _is_radio(disp) or _is_radio(cid)))
+    cache = {}
+    for row in rows:
+        key = _norm_name(row['name'])
+        if len(key) < 3:
+            continue
+        if key not in cache:
+            best = None
+            radio = _is_radio(row['name'])
+            for cid, disp, keys, c_radio in cands:
+                if c_radio != radio:       # a radio station is not its TV namesake
+                    continue
+                for k in keys:
+                    sm = SequenceMatcher(None, key, k, autojunk=False)
+                    if sm.real_quick_ratio() < threshold or sm.quick_ratio() < threshold:
+                        continue
+                    score = sm.ratio()
+                    if score >= threshold and _digits(k) == _digits(key) and (best is None or score > best[2]):
+                        best = (cid, disp, score)
+            cache[key] = best
+        best = cache[key]
+        if best:
+            row['suggest'] = {'epg_id': best[0], 'name': best[1], 'score': round(best[2] * 100)}
 
 
 def _selected_ids():
@@ -124,11 +190,12 @@ def _parse_xmltv_time(value):
     return None
 
 
-def coverage():
+def coverage(with_suggestions=False):
     """How many ticked channels get guide data, and why the others don't."""
     ticked = list(PlaylistChannel.objects.filter(included=True)
                   .values_list('pk', 'tvg_name', 'tvg_id', 'group_title').order_by('group_title', 'tvg_name'))
-    epg_ids = set(EpgChannel.objects.values_list('channel_id', flat=True))
+    epg_rows = list(EpgChannel.objects.values_list('channel_id', 'display_name'))
+    epg_ids = {c for c, _ in epg_rows}
     by_lower = {}
     for i in epg_ids:
         by_lower.setdefault(i.lower(), i)
@@ -136,32 +203,39 @@ def coverage():
                             .annotate(n=Count('id')).values_list('channel', 'n'))
 
     overrides, conflicts = id_overrides()
-    conflict_pks = {c['pk'] for c in conflicts}
+    conflicts_by_pk = {c['pk']: c for c in conflicts}
+    manual = manual_mappings()
     matched = 0
     problems = {'no_id': [], 'case_only': [], 'conflict': [], 'missing': [], 'empty': []}
-    fixed = []
+    fixed, mapped, no_guide = [], [], []
     for pk, name, tvg_id, group in ticked:
         row = {'pk': pk, 'name': name, 'tvg_id': tvg_id, 'group': group}
-        if not tvg_id:
-            problems['no_id'].append(row)
-        elif tvg_id in epg_ids:
-            if programme_counts.get(tvg_id, 0) == 0:
-                problems['empty'].append(row)
-            else:
-                matched += 1
+        m = manual.get(name)
+        if m and m[1]:
+            no_guide.append(row)
         elif pk in overrides:
             row['epg_id'] = overrides[pk]
             if programme_counts.get(overrides[pk], 0) == 0:
                 problems['empty'].append(row)
             else:
                 matched += 1
-                fixed.append(row)
-        elif pk in conflict_pks:
-            c = next(c for c in conflicts if c['pk'] == pk)
-            row['epg_id'] = c['epg_id']
-            row['epg_name'] = c['epg_name']
+                (mapped if m else fixed).append(row)
+        elif m and m[0]:                       # mapped by hand, but that EPG channel is gone
+            row['epg_id'] = m[0]
+            row['stale'] = True
+            mapped.append(row)
+        elif not tvg_id:
+            problems['no_id'].append(row)
+        elif tvg_id in epg_ids:
+            if programme_counts.get(tvg_id, 0) == 0:
+                problems['empty'].append(row)
+            else:
+                matched += 1
+        elif pk in conflicts_by_pk:
+            c = conflicts_by_pk[pk]
+            row['epg_id'], row['epg_name'] = c['epg_id'], c['epg_name']
             problems['conflict'].append(row)
-        elif tvg_id.lower() in by_lower:       # fix switched off
+        elif tvg_id.lower() in by_lower:       # automatic fix switched off
             row['epg_id'] = by_lower[tvg_id.lower()]
             problems['case_only'].append(row)
         else:
@@ -173,17 +247,29 @@ def coverage():
     if first and last:
         horizon = {'first': first, 'last': last, 'hours_ahead': round((last - timezone.now()).total_seconds() / 3600, 1)}
 
+    if with_suggestions:
+        epg_rows.sort()
+        for key in ('no_id', 'missing', 'conflict', 'empty', 'case_only'):
+            suggest(problems[key][:LIST_LIMIT], epg_rows)
+
     total = len(ticked)
+    expected = total - len(no_guide)       # channels you said have no guide don't count against the score
     return {
         'ticked': total,
+        'expected': expected,
         'matched': matched,
-        'percent': round(100 * matched / total) if total else 0,
+        'percent': round(100 * matched / expected) if expected else 0,
         'epg_channels': len(epg_ids),
+        'epg_list': sorted(epg_rows, key=lambda r: r[1].lower()) if with_suggestions else [],
         'counts': {k: len(v) for k, v in problems.items()},
+        'problems': {k: v[:LIST_LIMIT] for k, v in problems.items()},
         'fixed': fixed[:LIST_LIMIT],
         'fixed_count': len(fixed),
+        'mapped': mapped[:LIST_LIMIT],
+        'mapped_count': len(mapped),
+        'no_guide': no_guide[:LIST_LIMIT],
+        'no_guide_count': len(no_guide),
         'fix_enabled': fix_enabled(),
-        'problems': {k: v[:LIST_LIMIT] for k, v in problems.items()},
-        'truncated': any(len(v) > LIST_LIMIT for v in problems.values()),
+        'truncated': any(len(v) > LIST_LIMIT for v in list(problems.values()) + [fixed, mapped, no_guide]),
         'horizon': horizon,
     }

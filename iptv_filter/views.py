@@ -6,12 +6,12 @@ import xml.etree.ElementTree as ET
 from django.contrib import messages
 from django.db.models.functions import Length
 from django.shortcuts import render, redirect
-from django.http import HttpResponse, StreamingHttpResponse, FileResponse, Http404, HttpResponseNotModified
+from django.http import JsonResponse, HttpResponse, StreamingHttpResponse, FileResponse, Http404, HttpResponseNotModified
 from django.db import OperationalError
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.db.models import Count
 from django.core import serializers
-from iptv_filter.models import PlaylistChannel, CachedFile, EpgChannel, EpgProgramme, AppConfig, LogoCache
+from iptv_filter.models import PlaylistChannel, CachedFile, EpgChannel, EpgProgramme, EpgMapping, AppConfig, LogoCache
 from iptv_filter import __version__, settings_store, logo_cache, epg_quality
 from iptv_updater import iptv_updater
 from django.utils import timezone
@@ -427,5 +427,36 @@ def logo_file(request, name):
     return response
 
 
+@ensure_csrf_cookie
 def epg_coverage(request):
-    return render(request, 'iptv_filter/coverage.html', {'coverage': epg_quality.coverage()})
+    return render(request, 'iptv_filter/coverage.html', {'coverage': epg_quality.coverage(with_suggestions=True)})
+
+
+def epg_map_api(request):
+    """POST {pk, action: 'map'|'none'|'clear', epg_id?}: a manual decision about
+    one playlist channel's guide. Takes effect immediately."""
+    if request.method != 'POST':
+        return HttpResponse(status=405)
+    try:
+        data = json.loads(request.body or b'{}')
+        action = data.get('action')
+        channel = PlaylistChannel.objects.get(pk=int(data.get('pk')))
+    except (ValueError, TypeError, PlaylistChannel.DoesNotExist):
+        return JsonResponse({'ok': False, 'error': 'Unknown channel or bad request.'}, status=400)
+    if action == 'map':
+        epg_id = str(data.get('epg_id') or '').strip()
+        if not EpgChannel.objects.filter(channel_id=epg_id).exists():
+            return JsonResponse({'ok': False, 'error': f'"{epg_id}" is not a channel in the EPG file.'}, status=400)
+        EpgMapping.objects.update_or_create(tvg_name=channel.tvg_name, defaults={'epg_id': epg_id, 'no_guide': False})
+    elif action == 'none':
+        EpgMapping.objects.update_or_create(tvg_name=channel.tvg_name, defaults={'epg_id': '', 'no_guide': True})
+    elif action == 'clear':
+        EpgMapping.objects.filter(tvg_name=channel.tvg_name).delete()
+    else:
+        return JsonResponse({'ok': False, 'error': 'Unknown action.'}, status=400)
+    logger.info(f'EPG mapping for "{channel.tvg_name}": {action}' + (f' -> {epg_id}' if action == 'map' else ''))
+    try:
+        epg_quality.sync_flags()
+    except OperationalError:
+        logger.warning("Could not sync the guide selection right now; it follows at the next change or EPG refresh.")
+    return JsonResponse({'ok': True})

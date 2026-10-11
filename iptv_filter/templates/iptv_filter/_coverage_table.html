@@ -1,9 +1,27 @@
+{% comment %}
+rows, show_epg (extra "EPG id" column), mode: 'problem' (map / no guide actions), 'undo' (remove a manual decision) or '' (read only)
+{% endcomment %}
 <div class="table-responsive" style="max-height: 360px; overflow-y: auto;">
-    <table class="table table-sm table-striped mb-0">
-        <thead><tr><th>Channel</th><th>Group</th><th>tvg-id</th>{% if show_epg %}<th>EPG id</th>{% endif %}</tr></thead>
+    <table class="table table-sm table-striped mb-0 align-middle">
+        <thead><tr><th>Channel</th><th>Group</th><th>tvg-id</th>{% if show_epg %}<th>EPG id</th>{% endif %}{% if mode %}<th>{% if mode == 'problem' %}Guide channel{% endif %}</th>{% endif %}</tr></thead>
         <tbody>
         {% for r in rows %}
-            <tr><td>{{ r.name }}</td><td>{{ r.group }}</td><td><code>{{ r.tvg_id }}</code></td>{% if show_epg %}<td><code>{{ r.epg_id }}</code></td>{% endif %}</tr>
+            <tr data-pk="{{ r.pk }}">
+                <td>{{ r.name }}</td><td>{{ r.group }}</td><td><code>{{ r.tvg_id }}</code></td>
+                {% if show_epg %}<td><code>{{ r.epg_id }}</code>{% if r.stale %} <span class="badge text-bg-warning">not in EPG file</span>{% endif %}</td>{% endif %}
+                {% if mode == 'problem' %}
+                <td class="text-nowrap row-actions">
+                    <input type="text" class="form-control form-control-sm d-inline-block epg-input" style="width: 14rem;"
+                           list="epg-channels" placeholder="type to search" aria-label="EPG channel for {{ r.name }}"
+                           {% if r.suggest %}value="{{ r.suggest.epg_id }}"{% endif %}>
+                    <button type="button" class="btn btn-sm btn-primary" data-act="map">Use</button>
+                    <button type="button" class="btn btn-sm btn-outline-secondary" data-act="none" title="This channel has no guide anywhere">No guide</button>
+                    {% if r.suggest %}<span class="badge text-bg-info" title="{{ r.suggest.name }}">suggested {{ r.suggest.score }}%</span>{% endif %}
+                </td>
+                {% elif mode == 'undo' %}
+                <td class="row-actions"><button type="button" class="btn btn-sm btn-outline-secondary" data-act="clear">Remove</button></td>
+                {% endif %}
+            </tr>
         {% endfor %}
         </tbody>
     </table>

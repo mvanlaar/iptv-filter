@@ -112,3 +112,13 @@ class LogoCache(models.Model):
     fail_count = models.IntegerField(default=0)
     last_error = models.CharField(max_length=200, blank=True, default='')
     last_selected = models.DateTimeField(null=True, blank=True)  # last time a ticked channel used it
+
+
+class EpgMapping(models.Model):
+    """A manual decision about the guide of one playlist channel (keyed by its
+    unique name, which survives playlist re-imports): either "use this EPG
+    channel" or "this channel has no guide, stop reporting it"."""
+    tvg_name = models.CharField(max_length=100, unique=True)
+    epg_id = models.CharField(max_length=50, blank=True, default='')
+    no_guide = models.BooleanField(default=False)
+    updated = models.DateTimeField(auto_now=True)

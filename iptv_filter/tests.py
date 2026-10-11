@@ -675,7 +675,7 @@ from datetime import timedelta
 from unittest import mock
 
 from iptv_filter import logo_cache
-from iptv_filter.models import LogoCache
+from iptv_filter.models import LogoCache, EpgMapping
 
 PNG = b'\x89PNG\r\n\x1a\n' + b'x' * 200
 
@@ -1037,6 +1037,117 @@ class EpgIdFixTests(EpgTestBase):
         self._epg('npo1.nl', programmes=1)                              # exact id now exists
         epg_quality.sync_flags()
         self.assertIn('tvg-id="npo1.nl"', Client().get('/m3u').content.decode())
+
+
+class EpgLockRetryTests(EpgTestBase):
+    def test_locked_epg_update_is_retried_then_succeeds(self):
+        from unittest import mock
+        from django.db import OperationalError
+        from iptv_updater import iptv_updater as u
+        calls = []
+
+        def flaky(filetype):
+            calls.append(1)
+            if len(calls) < 3:
+                raise OperationalError('database is locked')
+            return True
+        with mock.patch.object(u, '_update_tables_impl', flaky), mock.patch.object(u.time, 'sleep') as sl:
+            self.assertTrue(u._update_tables('epg'))
+        self.assertEqual((len(calls), sl.call_count), (3, 2))
+
+    def test_other_errors_and_exhausted_retries_are_raised(self):
+        from unittest import mock
+        from django.db import OperationalError
+        from iptv_updater import iptv_updater as u
+        with mock.patch.object(u, '_update_tables_impl', side_effect=OperationalError('no such table')) as m:
+            with self.assertRaises(OperationalError):
+                u._update_tables('epg')
+            self.assertEqual(m.call_count, 1)
+        with mock.patch.object(u, '_update_tables_impl', side_effect=OperationalError('database is locked')) as m, \
+                mock.patch.object(u.time, 'sleep'):
+            with self.assertRaises(OperationalError):
+                u._update_tables('epg')
+            self.assertEqual(m.call_count, u.EPG_ATTEMPTS)
+
+    def test_transactions_start_immediately(self):
+        from django.db import connection
+        self.assertEqual(connection.settings_dict['OPTIONS'].get('transaction_mode'), 'IMMEDIATE')
+
+
+class EpgManualMappingTests(EpgTestBase):
+    def _post(self, **body):
+        c = Client()
+        return c.post('/coverage/map', data=json.dumps(body), content_type='application/json')
+
+    def test_map_channel_without_id_changes_m3u_and_epg(self):
+        ch = self._pc('NL| Radio 538', '', included=True)
+        self._epg('Radio538.nl', programmes=3)
+        epg_quality.sync_flags()
+        self.assertEqual(EpgProgramme.objects.filter(included=True).count(), 0)
+        r = self._post(pk=ch.pk, action='map', epg_id='Radio538.nl')
+        self.assertEqual(r.status_code, 200)
+        self.assertIn('tvg-id="Radio538.nl"', Client().get('/m3u').content.decode())
+        self.assertEqual(EpgProgramme.objects.filter(included=True).count(), 3)
+        cov = epg_quality.coverage()
+        self.assertEqual((cov['matched'], cov['mapped_count'], cov['counts']['no_id']), (1, 1, 0))
+
+    def test_manual_beats_wrong_provider_id(self):
+        ch = self._pc('NL| TV NOORD HD', 'rtvutrecht.nl', included=True)
+        self._epg('RTVUtrecht.nl')
+        self._epg('TVNoord.nl', programmes=2)
+        self._post(pk=ch.pk, action='map', epg_id='TVNoord.nl')
+        self.assertIn('tvg-id="TVNoord.nl"', Client().get('/m3u').content.decode())
+        self.assertEqual(epg_quality.coverage()['counts']['conflict'], 0)
+
+    def test_unknown_epg_id_is_refused(self):
+        ch = self._pc('A', '', included=True)
+        r = self._post(pk=ch.pk, action='map', epg_id='nope.nl')
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(EpgMapping.objects.count(), 0)
+        self.assertEqual(self._post(pk=99999, action='none').status_code, 400)
+        self.assertEqual(self._post(pk=ch.pk, action='explode').status_code, 400)
+        self.assertEqual(Client().get('/coverage/map').status_code, 405)
+
+    def test_no_guide_leaves_the_score_and_the_lists(self):
+        a = self._pc('Has', 'has.nl', included=True)
+        b = self._pc('NL| Viaplay Event 1', '', included=True)
+        self._epg('has.nl')
+        epg_quality.sync_flags()
+        self.assertEqual(epg_quality.coverage()['percent'], 50)
+        self._post(pk=b.pk, action='none')
+        cov = epg_quality.coverage()
+        self.assertEqual((cov['percent'], cov['expected'], cov['no_guide_count'], cov['counts']['no_id']), (100, 1, 1, 0))
+        self._post(pk=b.pk, action='clear')
+        self.assertEqual(epg_quality.coverage()['percent'], 50)
+
+    def test_decision_survives_reimport_and_stale_target_is_flagged(self):
+        ch = self._pc('A', '', included=True)
+        self._epg('a.nl')
+        self._post(pk=ch.pk, action='map', epg_id='a.nl')
+        EpgChannel.objects.all().delete()                       # guide source changed
+        cov = epg_quality.coverage()
+        self.assertEqual((cov['matched'], cov['mapped'][0]['stale']), (0, True))
+        self.assertIn('tvg-id=""', Client().get('/m3u').content.decode())
+
+    def test_suggestions(self):
+        self._pc('NL| NPO 1 HD', '', included=True)
+        self._pc('NL| NPO 2 HD', '', included=True)
+        self._pc('NL| Zzzzzz', '', included=True)
+        EpgChannel.objects.create(channel_id='NPO1.nl', display_name='NPO 1')
+        cov = epg_quality.coverage(with_suggestions=True)
+        by = {r['name']: r for r in cov['problems']['no_id']}
+        self.assertEqual(by['NL| NPO 1 HD']['suggest']['epg_id'], 'NPO1.nl')
+        self.assertNotIn('suggest', by['NL| NPO 2 HD'])          # numbers must match
+        self.assertNotIn('suggest', by['NL| Zzzzzz'])
+
+    def test_page_renders_controls_and_escapes(self):
+        self._pc('<b>x</b>', '', included=True)
+        EpgChannel.objects.create(channel_id='a.nl', display_name='<i>A</i>')
+        html = Client().get('/coverage').content.decode()
+        self.assertIn('data-act="map"', html)
+        self.assertIn('id="epg-channels"', html)
+        self.assertNotIn('<b>x</b>', html)
+        self.assertNotIn('<i>A</i>', html)
 
 
 class EpgCoverageTests(EpgTestBase):

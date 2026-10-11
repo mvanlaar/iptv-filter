@@ -6,17 +6,29 @@
 <p class="text-body-secondary">
     A ticked channel gets guide data when its <code>tvg-id</code> is the same as a channel <code>id</code> in the EPG file.
     Players compare exactly, so when your provider only differs in letter case
-    (<code>npo1.nl</code> vs <code>NPO1.nl</code>) the playlist this app serves carries the EPG's spelling
-    {% if not coverage.fix_enabled %}<strong>(this correction is switched off by <code>IPTV_FIX_EPG_IDS</code>)</strong>{% endif %}.
+    (<code>npo1.nl</code> vs <code>NPO1.nl</code>) the playlist this app serves carries the EPG's spelling{% if not coverage.fix_enabled %} <strong>(this correction is switched off by <code>IPTV_FIX_EPG_IDS</code>)</strong>{% endif %}.
     This page shows which ticked channels still get no guide, and why.
 </p>
+
+<p class="text-body-secondary small">
+    You can decide by hand for any channel below: type or pick the guide channel it should use and press <em>Use</em>,
+    or press <em>No guide</em> for channels you know have none (they then stop counting against the score).
+    The playlist served by this app uses your choice right away. When a channel name closely resembles an EPG channel, that channel is pre-filled as a suggestion; check it before pressing Use.
+</p>
+
+<div id="reloadNote" class="alert alert-success d-none py-2">Saved. <a href="/coverage">Reload</a> to refresh the numbers and lists.</div>
+
+<datalist id="epg-channels">
+    {% for cid, name in coverage.epg_list %}<option value="{{ cid }}">{{ name }}</option>{% endfor %}
+</datalist>
 
 <div class="row">
     <div class="col-12 col-sm-6 col-lg-3">
         <div class="info-box">
             <span class="info-box-icon text-bg-{% if coverage.percent >= 80 %}success{% elif coverage.percent >= 40 %}warning{% else %}danger{% endif %} shadow-sm"><i class="bi bi-percent"></i></span>
             <div class="info-box-content"><span class="info-box-text">With guide data</span>
-                <span class="info-box-number">{{ coverage.matched }} <small class="text-body-secondary">/ {{ coverage.ticked }} ({{ coverage.percent }}%)</small></span></div>
+                <span class="info-box-number">{{ coverage.matched }} <small class="text-body-secondary">/ {{ coverage.expected }} ({{ coverage.percent }}%)</small>
+                {% if coverage.no_guide_count %}<small class="text-body-secondary d-block">+ {{ coverage.no_guide_count }} no guide</small>{% endif %}</span></div>
         </div>
     </div>
     <div class="col-12 col-sm-6 col-lg-3">
@@ -52,7 +64,7 @@
     <div class="card-header"><h3 class="card-title">Id not in the EPG file <span class="badge text-bg-danger">{{ coverage.counts.missing }}</span></h3></div>
     <div class="card-body p-0">
         <div class="p-3 pb-0 small text-body-secondary">The channel has a <code>tvg-id</code>, but the EPG file has no channel with that id. Another EPG source may use these ids.</div>
-        {% include "iptv_filter/_coverage_table.html" with rows=coverage.problems.missing show_epg=False %}
+        {% include "iptv_filter/_coverage_table.html" with rows=coverage.problems.missing show_epg=False mode="problem" %}
     </div>
 </div>
 {% endif %}
@@ -72,7 +84,25 @@
     <div class="card-header"><h3 class="card-title">Id belongs to another channel? <span class="badge text-bg-danger">{{ coverage.counts.conflict }}</span></h3></div>
     <div class="card-body p-0">
         <div class="p-3 pb-0 small text-body-secondary">The id matches an EPG channel when case is ignored, but the channel name does not fit that EPG channel. Probably a provider mistake, so the id is left as it is and no guide is given.</div>
-        {% include "iptv_filter/_coverage_table.html" with rows=coverage.problems.conflict show_epg=True %}
+        {% include "iptv_filter/_coverage_table.html" with rows=coverage.problems.conflict show_epg=True mode="problem" %}
+    </div>
+</div>
+{% endif %}
+
+{% if coverage.mapped_count %}
+<div class="card mb-4 card-primary card-outline">
+    <div class="card-header"><h3 class="card-title">Mapped by hand <span class="badge text-bg-primary">{{ coverage.mapped_count }}</span></h3></div>
+    <div class="card-body p-0">
+        {% include "iptv_filter/_coverage_table.html" with rows=coverage.mapped show_epg=True mode="undo" %}
+    </div>
+</div>
+{% endif %}
+
+{% if coverage.no_guide_count %}
+<div class="card mb-4">
+    <div class="card-header"><h3 class="card-title">Marked as "no guide" <span class="badge text-bg-secondary">{{ coverage.no_guide_count }}</span></h3></div>
+    <div class="card-body p-0">
+        {% include "iptv_filter/_coverage_table.html" with rows=coverage.no_guide show_epg=False mode="undo" %}
     </div>
 </div>
 {% endif %}
@@ -82,7 +112,7 @@
     <div class="card-header"><h3 class="card-title">Differs only in letter case <span class="badge text-bg-warning">{{ coverage.counts.case_only }}</span></h3></div>
     <div class="card-body p-0">
         <div class="p-3 pb-0 small text-body-secondary">The ids match when case is ignored, and the automatic correction is switched off, so these get no guide.</div>
-        {% include "iptv_filter/_coverage_table.html" with rows=coverage.problems.case_only show_epg=True %}
+        {% include "iptv_filter/_coverage_table.html" with rows=coverage.problems.case_only show_epg=True mode="problem" %}
     </div>
 </div>
 {% endif %}
@@ -92,7 +122,7 @@
     <div class="card-header"><h3 class="card-title">In the EPG file, but no programmes <span class="badge text-bg-warning">{{ coverage.counts.empty }}</span></h3></div>
     <div class="card-body p-0">
         <div class="p-3 pb-0 small text-body-secondary">The id matches an EPG channel that currently lists no programmes.</div>
-        {% include "iptv_filter/_coverage_table.html" with rows=coverage.problems.empty show_epg=False %}
+        {% include "iptv_filter/_coverage_table.html" with rows=coverage.problems.empty show_epg=False mode="problem" %}
     </div>
 </div>
 {% endif %}
@@ -102,8 +132,55 @@
     <div class="card-header"><h3 class="card-title">No <code>tvg-id</code> in the playlist <span class="badge text-bg-secondary">{{ coverage.counts.no_id }}</span></h3></div>
     <div class="card-body p-0">
         <div class="p-3 pb-0 small text-body-secondary">The provider gives these channels no id, so they cannot be matched automatically.</div>
-        {% include "iptv_filter/_coverage_table.html" with rows=coverage.problems.no_id show_epg=False %}
+        {% include "iptv_filter/_coverage_table.html" with rows=coverage.problems.no_id show_epg=False mode="problem" %}
     </div>
 </div>
 {% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+    function getCookie(name) {
+        var m = document.cookie.split(';').map(function (c) { return c.trim(); })
+            .filter(function (c) { return c.indexOf(name + '=') === 0; })[0];
+        return m ? decodeURIComponent(m.substring(name.length + 1)) : null;
+    }
+    function done(tr, text, ok) {
+        var cell = tr.querySelector('.row-actions');
+        cell.textContent = '';
+        var span = document.createElement('span');
+        span.className = ok ? 'text-success' : 'text-danger';
+        span.textContent = text;
+        cell.appendChild(span);
+    }
+    document.addEventListener('click', function (ev) {
+        var btn = ev.target.closest('button[data-act]');
+        if (!btn) { return; }
+        var tr = btn.closest('tr');
+        var act = btn.getAttribute('data-act');
+        var body = { pk: parseInt(tr.getAttribute('data-pk'), 10), action: act };
+        if (act === 'map') {
+            body.epg_id = tr.querySelector('.epg-input').value.trim();
+            if (!body.epg_id) { tr.querySelector('.epg-input').focus(); return; }
+        }
+        btn.disabled = true;
+        fetch('/coverage/map', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRFToken': getCookie('csrftoken') || '' },
+            body: JSON.stringify(body)
+        }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+          .then(function (res) {
+              btn.disabled = false;
+              if (res.ok && res.j.ok) {
+                  done(tr, act === 'map' ? 'Saved: ' + body.epg_id : act === 'none' ? 'Marked as no guide' : 'Removed', true);
+                  document.getElementById('reloadNote').classList.remove('d-none');
+              } else {
+                  done(tr, (res.j && res.j.error) || 'Could not save', false);
+              }
+          })
+          .catch(function () { btn.disabled = false; done(tr, 'Could not reach the server', false); });
+    });
+})();
+</script>
 {% endblock %}
