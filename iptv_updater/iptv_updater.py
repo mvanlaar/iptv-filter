@@ -1,13 +1,14 @@
 import contextlib
 import io
 import os
+import sys
 import threading
 import requests
 import re
 import time
 from datetime import timedelta
 import xml.etree.ElementTree as ET
-from django.db import transaction
+from django.db import connection, transaction
 from django.utils import timezone
 from iptv_filter import settings_store
 from iptv_filter.models import AppConfig, CachedFile, PlaylistChannel, EpgChannel, EpgProgramme
@@ -240,76 +241,92 @@ def _update_tables_impl(filetype):
                     # Nothing usable to key this channel on - skip it.
                     pending_extinf = None
                     continue
-                pending_extinf = {
-                    'tvg_id': attrs.get('tvg-id', ''),
-                    'tvg_name': tvg_name,
-                    'tvg_logo': attrs.get('tvg-logo', ''),
-                    'group_title': attrs.get('group-title', ''),
-                }
-                # stream_url gets filled in on the next line.
+                # (name, tvg_id, tvg_logo, group_title) - the stream URL is on the next line.
+                # group_title is interned: the same few hundred strings repeat across a million rows.
+                pending_extinf = (tvg_name, attrs.get('tvg-id', ''), attrs.get('tvg-logo', ''),
+                                  sys.intern(attrs.get('group-title', '')))
 
             else:
                 if urlpattern.match(line) and pending_extinf is not None:
-                    if skip_vod and SKIP_VOD_RE.match(line) and pending_extinf['tvg_name'] not in keep_names:
+                    if skip_vod and SKIP_VOD_RE.match(line) and pending_extinf[0] not in keep_names:
                         skipped_vod += 1
                         pending_extinf = None
                         continue
                     # This is the URL line.
-                    pending_extinf['stream_url'] = line
-                    parsed[pending_extinf['tvg_name']] = pending_extinf
+                    # Stored as plain tuples, not dicts: ~3x less memory per entry,
+                    # which matters at a million+ entries.
+                    parsed[pending_extinf[0]] = pending_extinf[1:] + (line,)
                     pending_extinf = None  # Consumed; don't let a duplicate/extra URL line re-add this channel.
                 # else: not a recognized stream URL (e.g. a "[NO PUBLIC STREAM]"
                 # placeholder) - the pending channel has no usable stream and
                 # is dropped when the next #EXTINF line overwrites pending_extinf.
+
+        parse_secs = time.perf_counter() - start_perftime
+        logger.info(f"Parsed {len(parsed)} playlist entries in {parse_secs:.1f}s.")
 
         # Diff against what's already in the DB instead of deleting everything
         # and recreating it: most channels are unchanged between pulls, so we
         # only need to write the rows that are actually new, changed, or gone.
         # .values() avoids the cost of instantiating a full model object per
         # row just to compare a few fields.
-        existing = {
-            v['tvg_name']: v for v in
-            PlaylistChannel.objects.all().values('pk', 'tvg_name', 'tvg_id', 'tvg_logo', 'group_title', 'stream_url')
-        }
+        diff_start = time.perf_counter()
+        existing = {}
+        # .iterator() streams rows instead of caching a second copy of them.
+        for pk, name, tid, logo, group, url in PlaylistChannel.objects.values_list(
+                'pk', 'tvg_name', 'tvg_id', 'tvg_logo', 'group_title', 'stream_url').iterator(chunk_size=5000):
+            existing[name] = (pk, tid, logo, group, url)
 
-        to_create = []
-        to_update = []
+        new_names = []  # names to insert; their data is read back from `parsed` while writing
+        to_update = []  # (tvg_id, tvg_logo, group_title, stream_url, pk)
         for tvg_name, pdata in parsed.items():
-            if tvg_name in existing:
-                ex = existing[tvg_name]
-                if (ex['tvg_id'] != pdata['tvg_id'] or ex['tvg_logo'] != pdata['tvg_logo']
-                        or ex['group_title'] != pdata['group_title'] or ex['stream_url'] != pdata['stream_url']):
-                    to_update.append(PlaylistChannel(
-                        pk=ex['pk'], tvg_id=pdata['tvg_id'], tvg_logo=pdata['tvg_logo'],
-                        group_title=pdata['group_title'], stream_url=pdata['stream_url'], last_updated=now))
+            ex = existing.get(tvg_name)
+            if ex is not None:
+                if ex[1:] != pdata:
+                    to_update.append(pdata + (ex[0],))
                 # else: unchanged, nothing to write.
             else:
                 # TODO: Whitelists/blacklists for whether to include newly found channels (movies/tv series probably)
-                to_create.append(PlaylistChannel(
-                    tvg_id=pdata['tvg_id'], tvg_name=tvg_name, tvg_logo=pdata['tvg_logo'],
-                    group_title=pdata['group_title'], stream_url=pdata['stream_url'],
-                    last_updated=now, first_seen=now, included=False))
+                new_names.append(tvg_name)
 
-        stale_pks = [existing[n]['pk'] for n in existing.keys() - parsed.keys()]
+        stale_pks = [ex[0] for name, ex in existing.items() if name not in parsed]
+        unchanged = len(parsed) - len(new_names) - len(to_update)
+        existing = None  # free memory before the (long) write phase
+        logger.info(f"Compared against the database in {time.perf_counter()-diff_start:.1f}s: "
+                    f"{len(new_names)} to add, {len(to_update)} to update, {len(stale_pks)} to remove.")
 
-        # Apply in small batches, each in its own short transaction, so the
-        # web UI can keep reading and writing while a big update runs.
+        # Write with plain executemany() instead of the ORM. For bulk inserts the
+        # ORM spends most of its time converting every single value (~3x slower
+        # than the database itself on a million-row playlist). Batches are small
+        # and each is its own transaction, so the web UI can keep using the
+        # database while a big update runs.
+        write_start = time.perf_counter()
+        table = connection.ops.quote_name(PlaylistChannel._meta.db_table)
+        now_db = connection.ops.adapt_datetimefield_value(now)
         for i in range(0, len(stale_pks), WRITE_BATCH):
             with transaction.atomic():
                 PlaylistChannel.objects.filter(pk__in=stale_pks[i:i+WRITE_BATCH]).delete()
-        for i in range(0, len(to_create), WRITE_BATCH):
-            with transaction.atomic():
-                PlaylistChannel.objects.bulk_create(to_create[i:i+WRITE_BATCH])
+        insert_sql = (f"INSERT INTO {table} (tvg_id, tvg_name, tvg_logo, stream_url, group_title, "
+                      f"first_seen, last_updated, included) VALUES (%s, %s, %s, %s, %s, %s, %s, 0)")
+        for i in range(0, len(new_names), WRITE_BATCH):
+            rows = []
+            for name in new_names[i:i+WRITE_BATCH]:
+                tid, logo, group, url = parsed[name]
+                rows.append((tid, name, logo, url, group, now_db, now_db))
+            with transaction.atomic(), connection.cursor() as cur:
+                cur.executemany(insert_sql, rows)
+        update_sql = (f"UPDATE {table} SET tvg_id = %s, tvg_logo = %s, group_title = %s, stream_url = %s, "
+                      f"last_updated = '{now_db}' WHERE id = %s")
         for i in range(0, len(to_update), WRITE_BATCH):
-            with transaction.atomic():
-                PlaylistChannel.objects.bulk_update(to_update[i:i+WRITE_BATCH], ['tvg_id', 'tvg_logo', 'group_title', 'stream_url', 'last_updated'])
+            with transaction.atomic(), connection.cursor() as cur:
+                cur.executemany(update_sql, to_update[i:i+WRITE_BATCH])
+        logger.info(f"Wrote changes in {time.perf_counter()-write_start:.1f}s.")
         if skipped_vod:
             logger.info(f"Skipped {skipped_vod} movie/series entries (skip movies/series is ON, set via {skip_source}); channels you already ticked are kept.")
 
         logging.info(
             f"Done with Channels in {time.perf_counter()-start_perftime} seconds. "
-            f"({len(to_create)} new, {len(to_update)} changed, {len(stale_pks)} removed, "
-            f"{len(parsed)-len(to_create)-len(to_update)} unchanged)"
+            f"({len(new_names)} new, {len(to_update)} changed, {len(stale_pks)} removed, "
+            f"{unchanged} unchanged)"
         )
 
     elif filetype == 'epg':

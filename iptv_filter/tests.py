@@ -632,3 +632,38 @@ class SkipVodKeepsTickedTests(TestCase):
         names = set(PlaylistChannel.objects.values_list('tvg_name', flat=True))
         self.assertEqual(names, {'Live', 'Movie A'})
         self.assertTrue(PlaylistChannel.objects.get(tvg_name='Movie A').included)
+
+
+class SchemaTests(TestCase):
+    def test_models_and_migrations_are_in_sync(self):
+        from django.core.management import call_command
+        # Fails if a model change was made without its migration.
+        call_command('makemigrations', '--check', '--dry-run', verbosity=0)
+
+    def test_name_lookup_uses_the_unique_index_only(self):
+        from django.db import connection
+        with connection.cursor() as cur:
+            cur.execute("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name=%s",
+                        [PlaylistChannel._meta.db_table])
+            cols = []
+            for (name,) in cur.fetchall():
+                cur.execute(f'PRAGMA index_info("{name}")')
+                cols.append(tuple(r[2] for r in cur.fetchall()))
+        # one index on tvg_name (the unique constraint's), not two
+        self.assertEqual(sum(1 for c in cols if c == ('tvg_name',)), 1)
+
+    def test_updates_and_inserts_use_correct_values(self):
+        _seed_cached_file('m3u', '#EXTM3U\n#EXTINF:-1 tvg-id="i1" tvg-name="N1" tvg-logo="L" group-title="G",N1\nhttp://s/1\n')
+        iptv_updater._update_tables('m3u')
+        ch = PlaylistChannel.objects.get(tvg_name='N1')
+        self.assertEqual((ch.tvg_id, ch.tvg_logo, ch.group_title, ch.stream_url, ch.included), ('i1', 'L', 'G', 'http://s/1', False))
+        self.assertIsNotNone(ch.first_seen)
+        first_seen = ch.first_seen
+        PlaylistChannel.objects.filter(pk=ch.pk).update(included=True)
+        _seed_cached_file('m3u', '#EXTM3U\n#EXTINF:-1 tvg-id="i2" tvg-name="N1" tvg-logo="L2" group-title="G2",N1\nhttp://s/2\n')
+        iptv_updater._update_tables('m3u')
+        ch = PlaylistChannel.objects.get(tvg_name='N1')
+        self.assertEqual((ch.tvg_id, ch.tvg_logo, ch.group_title, ch.stream_url), ('i2', 'L2', 'G2', 'http://s/2'))
+        self.assertTrue(ch.included)             # user's tick survives an update
+        self.assertEqual(ch.first_seen, first_seen)  # first_seen is not reset
+        self.assertGreaterEqual(ch.last_updated, first_seen)

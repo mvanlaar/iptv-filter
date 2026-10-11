@@ -33,7 +33,7 @@ class AppConfig(models.Model):
 
 class PlaylistChannel(models.Model):
     tvg_id = models.CharField(max_length=50)
-    tvg_name = models.CharField(max_length=100, db_index=True)
+    tvg_name = models.CharField(max_length=100)  # indexed via the UniqueConstraint in Meta (a second db_index here would just duplicate that index)
     tvg_logo = models.TextField() #this is sometimes an embedded image, which is large.
     stream_url = models.URLField()
     first_seen = models.DateTimeField(null=True,blank=True, db_index=True)
