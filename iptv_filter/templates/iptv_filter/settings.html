@@ -21,22 +21,18 @@
                 </div>
                 <div class="card-body">
                     <label class="form-label" for="{{ src.key }}_url">URL</label>
-                    <div class="input-group">
-                        <input type="password" class="form-control" id="{{ src.key }}_url" name="{{ src.key }}_url"
+                    <div>
+                        <input type="text" class="form-control" id="{{ src.key }}_url" name="{{ src.key }}_url"
                             value="{{ src.url }}" placeholder="https://&hellip;" autocomplete="off" spellcheck="false">
-                        <button class="btn btn-outline-secondary reveal-btn" type="button" data-target="{{ src.key }}_url" title="Show / hide">
-                            <i class="bi bi-eye"></i>
-                        </button>
                     </div>
                     <div class="form-text">
-                        Shown hidden because provider URLs usually contain your username and password.
                         {% if src.source == 'gui' and src.env_set %}
-                        <br><i class="bi bi-info-circle"></i> The environment variable <code>{{ src.env_name }}</code> is set but ignored,
+                        <i class="bi bi-info-circle"></i> The environment variable <code>{{ src.env_name }}</code> is set but ignored,
                         because a URL is saved here. Clear the field and save to use the environment variable again.
                         {% elif src.source == 'gui' %}
-                        <br>Clear the field and save to remove the saved URL.
+                        Clear the field and save to remove the saved URL.
                         {% elif src.env_set %}
-                        <br>Currently coming from <code>{{ src.env_name }}</code>. Saving a different URL here takes precedence over it.
+                        Currently coming from <code>{{ src.env_name }}</code>. Saving a different URL here takes precedence over it.
                         {% endif %}
                     </div>
                     {% if src.cached %}
@@ -88,17 +84,4 @@
         <button type="submit" name="action" value="reprocess" class="btn btn-outline-primary"><i class="bi bi-arrow-repeat me-1"></i> Save &amp; re-process playlist</button>
     </div>
 </form>
-{% endblock %}
-
-{% block scripts %}
-<script>
-    document.querySelectorAll('.reveal-btn').forEach(function (btn) {
-        btn.addEventListener('click', function () {
-            var input = document.getElementById(btn.dataset.target);
-            var show = input.type === 'password';
-            input.type = show ? 'text' : 'password';
-            btn.innerHTML = '<i class="bi bi-eye' + (show ? '-slash' : '') + '"></i>';
-        });
-    });
-</script>
 {% endblock %}
