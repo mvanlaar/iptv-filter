@@ -9,7 +9,7 @@ from django.shortcuts import render, redirect
 from django.http import JsonResponse, HttpResponse, StreamingHttpResponse, FileResponse, Http404, HttpResponseNotModified
 from django.db import OperationalError
 from django.views.decorators.csrf import ensure_csrf_cookie
-from django.db.models import Count
+from django.db.models import Count, Q
 from django.core import serializers
 from iptv_filter.models import PlaylistChannel, CachedFile, EpgChannel, EpgProgramme, EpgMapping, AppConfig, LogoCache
 from iptv_filter import __version__, settings_store, logo_cache, epg_quality
@@ -156,37 +156,19 @@ def epg_api(request):
     logger.info("Responded to epg API call")
     return HttpResponse(epg, content_type="text/xml")
 
+@ensure_csrf_cookie
 def configure(request):
     if request.method == 'GET':
-        group_includes = list(PlaylistChannel.objects.order_by('group_title').distinct().values('group_title','included'))
-        
-        gcs = PlaylistChannel.objects.all().values('group_title').annotate(count=Count('id'))
-        group_counts = {}
-        for gc in gcs:
-            group_counts[gc['group_title']] = gc['count']
-
-        prev_gi = None
-        gi_to_remove=[]
-        for gi in group_includes:
-            gi['label'] = f"{gi['group_title']} ({group_counts[gi['group_title']]} channels)"
-
-            if prev_gi is None:
-                prev_gi = gi
-                continue
-
-            if gi.get('group_title') == prev_gi.get('group_title'):
-                if prev_gi.get('included'):
-                    gi_to_remove.append(gi)
-                else:
-                    gi_to_remove.append(prev_gi)
-
-            prev_gi = gi
-
-        for extra_gi in gi_to_remove:
-            group_includes.remove(extra_gi)
-
+        # One row per group with how many of its channels are ticked; the page
+        # lists the channels of a group on demand (see groups_channels).
+        rows = (PlaylistChannel.objects.values('group_title')
+                .annotate(total=Count('id'), selected=Count('id', filter=Q(included=True)))
+                .order_by('group_title'))
+        groups = [{'name': r['group_title'], 'total': r['total'], 'selected': r['selected'],
+                   'state': 'all' if r['selected'] == r['total'] else ('some' if r['selected'] else 'none')}
+                  for r in rows]
         return render(request, 'iptv_filter/select_groups.html', {
-            'group_includes': group_includes,
+            'groups': groups,
             'saved': request.GET.get('saved'),
         })
 
@@ -210,6 +192,100 @@ def configure(request):
         # Post/Redirect/Get: back to the form with a confirmation instead of
         # leaving the browser on a bare text response.
         return redirect(f'/configure?saved={time.perf_counter()-start_perftime:.1f}')
+
+
+# ---------------------------------------------
+# Groups page: look into a group and tick/untick single channels, or a whole
+# group (optionally only the channels matching a filter). Every change is saved
+# at once; the guide selection and logo cache follow it.
+
+PAGE_LIMIT = 200
+
+
+def _group_counts(names):
+    out = {}
+    rows = (PlaylistChannel.objects.filter(group_title__in=list(names)).values('group_title')
+            .annotate(total=Count('id'), selected=Count('id', filter=Q(included=True))))
+    for r in rows:
+        out[r['group_title']] = {'total': r['total'], 'selected': r['selected']}
+    return out
+
+
+def _selection_changed():
+    try:
+        epg_quality.sync_flags()
+    except OperationalError:
+        logger.warning("Could not update EPG flags right now (database busy); the next EPG refresh will.")
+    logo_cache.request_sync()
+
+
+def _json_body(request):
+    try:
+        data = json.loads(request.body or b'{}')
+        return data if isinstance(data, dict) else None
+    except json.JSONDecodeError:
+        return None
+
+
+def groups_channels(request):
+    """GET ?group=NAME&q=TEXT&offset=0&limit=200 -> one page of a group's channels."""
+    group = request.GET.get('group')
+    if group is None:
+        return JsonResponse({'ok': False, 'error': 'group is required'}, status=400)
+    try:
+        offset = max(0, int(request.GET.get('offset', 0)))
+        limit = min(PAGE_LIMIT, max(1, int(request.GET.get('limit', 100))))
+    except ValueError:
+        return JsonResponse({'ok': False, 'error': 'bad offset or limit'}, status=400)
+    qs = PlaylistChannel.objects.filter(group_title=group)
+    text = (request.GET.get('q') or '').strip()
+    if text:
+        qs = qs.filter(tvg_name__icontains=text)
+    total = qs.count()
+    items = [{'pk': pk, 'name': name, 'included': bool(inc)}
+             for pk, name, inc in qs.order_by('tvg_name').values_list('pk', 'tvg_name', 'included')[offset:offset + limit]]
+    counts = _group_counts([group]).get(group, {'total': 0, 'selected': 0})
+    return JsonResponse({'ok': True, 'total': total, 'items': items, 'group': counts,
+                         'matching_selected': qs.filter(included=True).count() if text else counts['selected']})
+
+
+def groups_set(request):
+    """POST {groups: [names], included: bool, q?: text} -> tick/untick whole groups.
+    With q (and exactly one group) only the channels whose name contains q."""
+    if request.method != 'POST':
+        return HttpResponse(status=405)
+    data = _json_body(request)
+    if data is None or not isinstance(data.get('groups'), list) or not isinstance(data.get('included'), bool):
+        return JsonResponse({'ok': False, 'error': 'Expected {groups: [...], included: true|false}.'}, status=400)
+    groups = [g for g in data['groups'] if isinstance(g, str)]
+    qs = PlaylistChannel.objects.filter(group_title__in=groups)
+    text = str(data.get('q') or '').strip()
+    if text:
+        if len(groups) != 1:
+            return JsonResponse({'ok': False, 'error': 'A filter text needs exactly one group.'}, status=400)
+        qs = qs.filter(tvg_name__icontains=text)
+    changed = qs.exclude(included=data['included']).update(included=data['included'])
+    logger.info(f"Groups {'ticked' if data['included'] else 'unticked'}: {len(groups)} group(s)"
+                f"{' (filter ' + repr(text) + ')' if text else ''}, {changed} channel(s) changed")
+    if changed:
+        _selection_changed()
+    return JsonResponse({'ok': True, 'changed': changed, 'groups': _group_counts(groups)})
+
+
+def groups_toggle(request):
+    """POST {pks: [ids], included: bool} -> tick/untick single channels in one go."""
+    if request.method != 'POST':
+        return HttpResponse(status=405)
+    data = _json_body(request)
+    pks = data.get('pks') if data else None
+    if not isinstance(pks, list) or not all(isinstance(i, int) for i in pks) or not isinstance(data.get('included'), bool):
+        return JsonResponse({'ok': False, 'error': 'Expected {pks: [...], included: true|false}.'}, status=400)
+    pks = pks[:5000]
+    affected = set(PlaylistChannel.objects.filter(pk__in=pks).values_list('group_title', flat=True))
+    changed = PlaylistChannel.objects.filter(pk__in=pks).exclude(included=data['included']).update(included=data['included'])
+    if changed:
+        _selection_changed()
+    return JsonResponse({'ok': True, 'changed': changed, 'groups': _group_counts(affected)})
 
 
 def _status_payload():
@@ -443,6 +519,7 @@ def epg_map_api(request):
         channel = PlaylistChannel.objects.get(pk=int(data.get('pk')))
     except (ValueError, TypeError, PlaylistChannel.DoesNotExist):
         return JsonResponse({'ok': False, 'error': 'Unknown channel or bad request.'}, status=400)
+    before = epg_quality.id_overrides()[0].get(channel.pk)
     if action == 'map':
         epg_id = str(data.get('epg_id') or '').strip()
         if not EpgChannel.objects.filter(channel_id=epg_id).exists():
@@ -456,7 +533,9 @@ def epg_map_api(request):
         return JsonResponse({'ok': False, 'error': 'Unknown action.'}, status=400)
     logger.info(f'EPG mapping for "{channel.tvg_name}": {action}' + (f' -> {epg_id}' if action == 'map' else ''))
     try:
-        epg_quality.sync_flags()
+        # Only the EPG channels this channel pointed to before / points to now (or carries as its own id) can change.
+        after = epg_quality.id_overrides()[0].get(channel.pk)
+        epg_quality.sync_flags(only={before, after, channel.tvg_id})
     except OperationalError:
         logger.warning("Could not sync the guide selection right now; it follows at the next change or EPG refresh.")
     return JsonResponse({'ok': True})

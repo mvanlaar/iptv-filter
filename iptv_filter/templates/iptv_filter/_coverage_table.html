@@ -12,7 +12,7 @@ rows, show_epg (extra "EPG id" column), mode: 'problem' (map / no guide actions)
                 {% if mode == 'problem' %}
                 <td class="text-nowrap row-actions">
                     <input type="text" class="form-control form-control-sm d-inline-block epg-input" style="width: 14rem;"
-                           list="epg-channels" placeholder="type to search" aria-label="EPG channel for {{ r.name }}"
+                           autocomplete="off" placeholder="type a name or id" aria-label="EPG channel for {{ r.name }}"
                            {% if r.suggest %}value="{{ r.suggest.epg_id }}"{% endif %}>
                     <button type="button" class="btn btn-sm btn-primary" data-act="map">Use</button>
                     <button type="button" class="btn btn-sm btn-outline-secondary" data-act="none" title="This channel has no guide anywhere">No guide</button>

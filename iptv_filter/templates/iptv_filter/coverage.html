@@ -11,16 +11,15 @@
 </p>
 
 <p class="text-body-secondary small">
-    You can decide by hand for any channel below: type or pick the guide channel it should use and press <em>Use</em>,
+    You can decide by hand for any channel below: start typing a name or id of the guide channel it should use (for example <em>ziggo sport 2</em>), pick it from the list and press <em>Use</em>,
     or press <em>No guide</em> for channels you know have none (they then stop counting against the score).
     The playlist served by this app uses your choice right away. When a channel name closely resembles an EPG channel, that channel is pre-filled as a suggestion; check it before pressing Use.
 </p>
 
 <div id="reloadNote" class="alert alert-success d-none py-2">Saved. <a href="/coverage">Reload</a> to refresh the numbers and lists.</div>
 
-<datalist id="epg-channels">
-    {% for cid, name in coverage.epg_list %}<option value="{{ cid }}">{{ name }}</option>{% endfor %}
-</datalist>
+{{ coverage.epg_list|json_script:"epg-data" }}
+<div id="epgSuggest" class="list-group shadow d-none" role="listbox" style="position: fixed; z-index: 2000; max-height: 18rem; overflow-y: auto; min-width: 22rem;"></div>
 
 <div class="row">
     <div class="col-12 col-sm-6 col-lg-3">
@@ -141,6 +140,80 @@
 {% block scripts %}
 <script>
 (function () {
+    // ---- typeahead over the EPG channels ---------------------------------
+    var EPG = [];
+    try { EPG = JSON.parse(document.getElementById('epg-data').textContent) || []; } catch (e) { EPG = []; }
+    function norm(t) { return String(t || '').toLowerCase().replace(/[^a-z0-9]+/g, ''); }
+    var index = EPG.map(function (c) { return { id: c[0], name: c[1], key: norm(c[0] + ' ' + c[1]), idKey: norm(c[0]), nameKey: norm(c[1]) }; });
+    var box = document.getElementById('epgSuggest');
+    var activeInput = null, items = [], hot = -1;
+
+    function search(text) {
+        var tokens = String(text || '').toLowerCase().split(/\s+/).map(norm).filter(Boolean);
+        if (!tokens.length) { return index.slice(0, 12); }
+        var whole = norm(text), out = [];
+        index.forEach(function (c) {
+            for (var i = 0; i < tokens.length; i++) { if (c.key.indexOf(tokens[i]) < 0) { return; } }
+            var rank = (c.idKey === whole || c.nameKey === whole) ? 0 : (c.nameKey.indexOf(whole) === 0 || c.idKey.indexOf(whole) === 0) ? 1 : (c.key.indexOf(whole) >= 0) ? 2 : 3;
+            out.push([rank, c]);
+        });
+        out.sort(function (a, b) { return a[0] - b[0] || a[1].name.localeCompare(b[1].name); });
+        return out.slice(0, 12).map(function (x) { return x[1]; });
+    }
+    function hide() { box.classList.add('d-none'); hot = -1; items = []; }
+    function paint() {
+        Array.prototype.forEach.call(box.children, function (el, i) { el.classList.toggle('active', i === hot); });
+        if (hot >= 0 && box.children[hot]) { box.children[hot].scrollIntoView({ block: 'nearest' }); }
+    }
+    function show(input) {
+        activeInput = input;
+        items = search(input.value);
+        box.textContent = '';
+        if (!items.length) {
+            var none = document.createElement('div');
+            none.className = 'list-group-item small text-body-secondary';
+            none.textContent = 'No EPG channel matches';
+            box.appendChild(none);
+        }
+        items.forEach(function (c, i) {
+            var el = document.createElement('button');
+            el.type = 'button';
+            el.className = 'list-group-item list-group-item-action py-1';
+            el.setAttribute('role', 'option');
+            var n = document.createElement('div'); n.textContent = c.name;
+            var d = document.createElement('div'); d.className = 'small text-body-secondary'; d.textContent = c.id;
+            el.appendChild(n); el.appendChild(d);
+            el.addEventListener('mousedown', function (ev) { ev.preventDefault(); choose(i); });
+            box.appendChild(el);
+        });
+        var r = input.getBoundingClientRect();
+        box.style.left = Math.max(8, r.left) + 'px';
+        var below = window.innerHeight - r.bottom;
+        if (below < 200 && r.top > below) { box.style.top = 'auto'; box.style.bottom = (window.innerHeight - r.top + 2) + 'px'; }
+        else { box.style.bottom = 'auto'; box.style.top = (r.bottom + 2) + 'px'; }
+        box.classList.remove('d-none');
+        hot = items.length ? 0 : -1;
+        paint();
+    }
+    function choose(i) {
+        var c = items[i];
+        if (!c || !activeInput) { return; }
+        activeInput.value = c.id;
+        activeInput.title = c.name;
+        hide();
+    }
+    document.addEventListener('focusin', function (ev) { if (ev.target.classList && ev.target.classList.contains('epg-input')) { show(ev.target); } });
+    document.addEventListener('input', function (ev) { if (ev.target.classList && ev.target.classList.contains('epg-input')) { show(ev.target); } });
+    document.addEventListener('focusout', function (ev) { if (ev.target.classList && ev.target.classList.contains('epg-input')) { setTimeout(hide, 100); } });
+    document.addEventListener('keydown', function (ev) {
+        if (!activeInput || box.classList.contains('d-none') || ev.target !== activeInput) { return; }
+        if (ev.key === 'ArrowDown') { ev.preventDefault(); hot = Math.min(items.length - 1, hot + 1); paint(); }
+        else if (ev.key === 'ArrowUp') { ev.preventDefault(); hot = Math.max(0, hot - 1); paint(); }
+        else if (ev.key === 'Enter' && hot >= 0) { ev.preventDefault(); choose(hot); }
+        else if (ev.key === 'Escape') { hide(); }
+    });
+    window.addEventListener('resize', hide);
+    document.addEventListener('scroll', function (ev) { if (ev.target !== box) { hide(); } }, true);
     function getCookie(name) {
         var m = document.cookie.split(';').map(function (c) { return c.trim(); })
             .filter(function (c) { return c.indexOf(name + '=') === 0; })[0];

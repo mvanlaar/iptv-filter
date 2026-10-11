@@ -7,6 +7,7 @@ services:
       - IPTV_M3U_URL=
       - IPTV_EPG_URL=
       - TZ=
+      # - IPTV_DB_PATH=/data/db.sqlite3     # keep the database (ticked channels, manual EPG choices) on the volume below
       # - IPTV_USER_AGENT=
       # - IPTV_READ_TIMEOUT=300
       # - IPTV_SKIP_VOD=1
@@ -15,4 +16,5 @@ services:
     ports:
       - "8000:8000"
     # volumes:
+    #   - ./data:/data                     # database; needs IPTV_DB_PATH=/data/db.sqlite3 above
     #   - ./logo_cache:/code/logo_cache   # keep cached logos across container re-creation

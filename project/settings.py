@@ -79,7 +79,7 @@ DEFAULT_AUTO_FIELD = 'django.db.models.AutoField'
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        'NAME': os.environ.get('IPTV_DB_PATH') or BASE_DIR / 'db.sqlite3',
         'OPTIONS': {
             # The background updater and web requests share this file. WAL lets
             # readers keep working while a writer is active, and the timeout makes

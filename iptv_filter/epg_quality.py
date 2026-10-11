@@ -162,19 +162,40 @@ def _selected_ids():
     return PlaylistChannel.objects.filter(included=True).exclude(tvg_id='').values('tvg_id')
 
 
-def sync_flags():
+def sync_flags(only=None):
     """Set EpgChannel/EpgProgramme.included to match the ticked playlist channels,
     right now. Only rows that actually change are written, using set-based
-    UPDATEs (no per-channel queries). Returns the number of rows changed."""
+    UPDATEs (no per-channel queries). Returns the number of rows changed.
+
+    ``only`` limits the work to the given EPG channel ids (used after a single
+    manual mapping, where only a couple of ids can have changed)."""
+    if only is not None:
+        only = sorted({i for i in only if i})
+        if not only:
+            return 0
     changed = 0
-    corrected = sorted(set(id_overrides()[0].values()))   # EPG ids reached through the case fix
+    corrected = sorted(set(id_overrides()[0].values()))   # EPG ids reached through a mapping or the case fix
+    if only is not None:
+        # A few ids: decide them here with one small query instead of letting every
+        # UPDATE re-scan the (huge) playlist table through a subquery.
+        wanted = set(PlaylistChannel.objects.filter(included=True, tvg_id__in=only).values_list('tvg_id', flat=True))
+        wanted |= set(only) & set(corrected)
+        for model, column in ((EpgChannel, 'channel_id'), (EpgProgramme, 'channel')):
+            on = [i for i in only if i in wanted]
+            off = [i for i in only if i not in wanted]
+            if on:
+                changed += model.objects.filter(**{f'{column}__in': on}).exclude(included=True).update(included=True)
+            if off:
+                changed += model.objects.filter(**{f'{column}__in': off}).exclude(included=False).update(included=False)
+        return changed
     for model, column in ((EpgChannel, 'channel_id'), (EpgProgramme, 'channel')):
         selected = Q(**{f'{column}__in': _selected_ids()})
         if corrected:
             selected |= Q(**{f'{column}__in': corrected})
+        rows = model.objects.all()
         # NULL counts as "not included" for both directions.
-        changed += model.objects.filter(selected).exclude(included=True).update(included=True)
-        changed += model.objects.filter(~selected).exclude(included=False).update(included=False)
+        changed += rows.filter(selected).exclude(included=True).update(included=True)
+        changed += rows.filter(~selected).exclude(included=False).update(included=False)
     return changed
 
 

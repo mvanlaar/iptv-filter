@@ -92,9 +92,9 @@ The pages share one layout ([AdminLTE](https://github.com/ColorlibHQ/AdminLTE) /
 
 # How channels are matched to the guide (EPG)
 
-A ticked channel gets guide data when the `tvg-id` in the M3U is exactly the same as a channel `id` in the XMLTV file (case-sensitive; there is no matching on names). Providers often differ from the EPG only in letter case (`npo1.nl` vs `NPO1.nl`); since players match exactly, the playlist served at `/m3u` then carries the EPG's spelling, and the guide for it is included. This is only done when the channel name fits the EPG channel (so a channel that wrongly carries another channel's id is left alone and listed on the coverage page). Set `IPTV_FIX_EPG_IDS=0` to switch the correction off.
+A ticked channel gets guide data when the `tvg-id` in the M3U is exactly the same as a channel `id` in the XMLTV file (case-sensitive; there is no matching on names). `/epg` only contains the channels and programmes of ticked channels, and this follows your selection immediately: ticking or unticking a channel, or saving groups, updates it right away (no need to wait for the hourly EPG refresh). Use the **EPG coverage** page to see which ticked channels have no match and why. Providers often differ from the EPG only in letter case (`npo1.nl` vs `NPO1.nl`); since players match exactly, the playlist served at `/m3u` then carries the EPG's spelling, and the guide for it is included. This is only done when the channel name fits the EPG channel (so a channel that wrongly carries another channel's id is left alone and listed on the coverage page). Set `IPTV_FIX_EPG_IDS=0` to switch the correction off.
 
-**Manual matching.** On the **EPG coverage** page every channel without guide data has a field to pick the EPG channel it should use (a closely matching one is pre-filled as a suggestion; numbers must match exactly) and a *Use* button, plus a *No guide* button for channels that have none anywhere (they stop counting against the score). Decisions are stored by channel name, so they survive playlist re-imports, take effect immediately in `/m3u` and `/epg`, and win over the automatic correction. They can be removed again from the *Mapped by hand* and *Marked as no guide* lists. `/epg` only contains the channels and programmes of ticked channels, and this follows your selection immediately: ticking or unticking a channel, or saving groups, updates it right away (no need to wait for the hourly EPG refresh). Use the **EPG coverage** page to see which ticked channels have no match and why.
+**Manual matching.** On the **EPG coverage** page every channel without guide data has a field to pick the EPG channel it should use (a closely matching one is pre-filled as a suggestion; numbers must match exactly) and a *Use* button, plus a *No guide* button for channels that have none anywhere (they stop counting against the score). Decisions are stored by channel name, so they survive playlist re-imports, take effect immediately in `/m3u` and `/epg`, and win over the automatic correction. They can be removed again from the *Mapped by hand* and *Marked as no guide* lists.
 
 # Logo cache
 
@@ -107,6 +107,8 @@ Players such as Kodi download every `tvg-logo` themselves from the provider's im
 * Switch it on or off on the **Settings** page (a saved value wins over the environment). Status is shown on the Dashboard.
 
 Environment variables (all optional): `IPTV_LOGO_CACHE=0` (disable by default), `IPTV_LOGO_DIR` (cache folder), `IPTV_LOGO_ALLOW_PRIVATE=1` (allow logo hosts on private/LAN addresses). In Docker, mount a volume on `/code/logo_cache` to keep the cache when the container is recreated; otherwise it simply refills.
+
+**Keeping your data.** The database (ticked channels, saved settings, manual EPG choices, the stored playlist) lives in `/code/db.sqlite3` inside the container, so it is lost whenever the container is re-created, and the next start has to re-import the whole playlist. To keep it, set `IPTV_DB_PATH=/data/db.sqlite3` and mount a volume on `/data` (a folder, not the single file, because SQLite also keeps `-wal`/`-shm` files next to it); see `docker-compose.yml`. The container creates or upgrades the database itself at start.
 
 # Scheduled retrieval
 
@@ -124,7 +126,7 @@ The following are the common URLs to use:
 * http://localhost:8000/settings - set the M3U and EPG URLs and the "skip movies/series" switch from the browser, and re-process the stored playlist without downloading it again.
 * http://localhost:8000/dashboard - overview: health, last fetch times, channel counts, any current error, and copy-ready URLs for your IPTV player.
 * http://localhost:8000/ - RUN THIS FIRST - This page allows you to adjust per-channel subscription. Changes are applied immediately.
-* http://localhost:8000/configure - set up the included groups whose channels you will be watching (Hit submit at the bottom of the page). Older interface but useful for managing entire groups at a time.
+* http://localhost:8000/configure - the **Groups** page: tick a group to include all of its channels, or open it (the arrow) to look at its channels and tick or untick single ones, with a filter box and *Tick all / Untick all matching* per group. A half-filled box means part of the group is ticked. Everything is saved immediately; there is no submit button.
 * http://localhost:8000/m3u - the m3u file your IPTV player should point to
 * http://localhost:8000/epg - the epg file your IPTV player should point to
 * http://localhost:8000/status - JSON health check: last successful fetch time, current error (if any), and channel/programme counts for both m3u and epg. Useful if you're running this unattended (e.g. in Docker) and want to confirm it's actually staying up to date. Example:

@@ -1074,6 +1074,109 @@ class EpgLockRetryTests(EpgTestBase):
         self.assertEqual(connection.settings_dict['OPTIONS'].get('transaction_mode'), 'IMMEDIATE')
 
 
+class GroupsDrilldownTests(EpgTestBase):
+    def setUp(self):
+        self.a1 = self._pc('NPO 1', 'npo1.nl', group='GA')
+        self.a2 = self._pc('NPO 2', 'npo2.nl', group='GA')
+        self.a3 = self._pc('RTL 4', 'rtl4.nl', group='GA')
+        self.b1 = self._pc('CNN', 'cnn.nl', group='GB')
+        self.c = Client()
+
+    def _post(self, url, **body):
+        return self.c.post(url, data=json.dumps(body), content_type='application/json')
+
+    def test_group_list_has_counts_and_states(self):
+        PlaylistChannel.objects.filter(pk=self.a1.pk).update(included=True)
+        html = self.c.get('/configure').content.decode()
+        self.assertIn('data-name="GA" data-search="ga" data-total="3" data-selected="1"', html)
+        self.assertIn('data-name="GB" data-search="gb" data-total="1" data-selected="0"', html)
+
+    def test_channel_page_with_filter_and_paging(self):
+        r = self.c.get('/groups/channels', {'group': 'GA'}).json()
+        self.assertEqual((r['total'], [i['name'] for i in r['items']]), (3, ['NPO 1', 'NPO 2', 'RTL 4']))
+        r = self.c.get('/groups/channels', {'group': 'GA', 'q': 'npo'}).json()
+        self.assertEqual((r['total'], r['group']['total']), (2, 3))
+        r = self.c.get('/groups/channels', {'group': 'GA', 'offset': 2, 'limit': 1}).json()
+        self.assertEqual([i['name'] for i in r['items']], ['RTL 4'])
+        self.assertEqual(self.c.get('/groups/channels').status_code, 400)
+        self.assertEqual(self.c.get('/groups/channels', {'group': 'GA', 'offset': 'x'}).status_code, 400)
+        self.assertEqual(self.c.get('/groups/channels', {'group': 'nope'}).json()['total'], 0)
+
+    def test_toggle_single_channels_updates_counts_and_guide(self):
+        self._epg('npo1.nl', programmes=2)
+        r = self._post('/groups/toggle', pks=[self.a1.pk, self.a2.pk], included=True).json()
+        self.assertEqual(r['groups'], {'GA': {'total': 3, 'selected': 2}})
+        self.assertEqual(EpgProgramme.objects.filter(included=True).count(), 2)       # guide follows at once
+        self._post('/groups/toggle', pks=[self.a1.pk], included=False)
+        self.assertEqual(EpgProgramme.objects.filter(included=True).count(), 0)
+        self.assertFalse(PlaylistChannel.objects.get(pk=self.a1.pk).included)
+        self.assertTrue(PlaylistChannel.objects.get(pk=self.a2.pk).included)           # other channels untouched
+
+    def test_whole_group_and_filtered_subset(self):
+        r = self._post('/groups/set', groups=['GA'], included=True).json()
+        self.assertEqual((r['changed'], r['groups']['GA']['selected']), (3, 3))
+        r = self._post('/groups/set', groups=['GA'], included=False, q='npo').json()    # only the NPO channels
+        self.assertEqual((r['changed'], r['groups']['GA']['selected']), (2, 1))
+        self.assertTrue(PlaylistChannel.objects.get(pk=self.a3.pk).included)
+        self.assertEqual(self._post('/groups/set', groups=['GA', 'GB'], included=True, q='x').status_code, 400)
+        self.assertEqual(self._post('/groups/set', groups=['GA'], included='yes').status_code, 400)
+        self.assertEqual(self._post('/groups/set', groups='GA', included=True).status_code, 400)
+        self.assertEqual(self.c.get('/groups/set').status_code, 405)
+
+    def test_group_tick_keeps_other_groups_and_is_idempotent(self):
+        self._post('/groups/set', groups=['GB'], included=True)
+        r = self._post('/groups/set', groups=['GA'], included=True).json()
+        self.assertTrue(PlaylistChannel.objects.get(pk=self.b1.pk).included)
+        self.assertEqual(self._post('/groups/set', groups=['GA'], included=True).json()['changed'], 0)
+
+    def test_bad_toggle_bodies(self):
+        self.assertEqual(self._post('/groups/toggle', pks=['x'], included=True).status_code, 400)
+        self.assertEqual(self._post('/groups/toggle', pks=[1]).status_code, 400)
+        self.assertEqual(self.c.post('/groups/toggle', data='{bad', content_type='application/json').status_code, 400)
+
+    def test_names_are_escaped(self):
+        self._pc('x', 'x', group='<script>alert(1)</script>')
+        self.assertNotIn('<script>alert(1)</script>', self.c.get('/configure').content.decode())
+
+
+class GroupsFilterTests(EpgTestBase):
+    def test_hidden_rows_rule_beats_bootstrap_d_flex(self):
+        # Rows carry Bootstrap's `d-flex` (display: flex !important); the rule that hides
+        # filtered-out rows must be !important too, or the name filter does nothing.
+        self._pc('A', 'a.nl', group='G1')
+        html = Client().get('/configure').content.decode()
+        self.assertIn('d-flex', html)
+        self.assertIn('.group-row.hidden { display: none !important; }', html)
+
+
+class EpgTargetedSyncTests(EpgTestBase):
+    def test_only_limits_the_work_to_the_given_ids(self):
+        self._pc('A', 'a.nl', included=True)
+        self._pc('B', 'b.nl', included=True)
+        self._epg('a.nl', programmes=2)
+        self._epg('b.nl', programmes=3)
+        self.assertEqual(epg_quality.sync_flags(only={'a.nl'}), 3)       # a.nl + its 2 programmes
+        self.assertIsNone(EpgChannel.objects.get(channel_id='b.nl').included)   # untouched
+        self.assertEqual(epg_quality.sync_flags(only=set()), 0)
+        self.assertEqual(epg_quality.sync_flags(only={None, ''}), 0)
+        epg_quality.sync_flags()
+        self.assertTrue(EpgChannel.objects.get(channel_id='b.nl').included)
+
+    def test_changing_a_mapping_moves_the_flags_between_two_epg_channels(self):
+        ch = self._pc('Radio', '', included=True)
+        self._epg('x.nl', programmes=1)
+        self._epg('y.nl', programmes=2)
+        c = Client()
+        post = lambda **b: c.post('/coverage/map', data=json.dumps(b), content_type='application/json')
+        post(pk=ch.pk, action='map', epg_id='x.nl')
+        self.assertEqual(EpgProgramme.objects.filter(included=True, channel='x.nl').count(), 1)
+        post(pk=ch.pk, action='map', epg_id='y.nl')
+        self.assertEqual(EpgProgramme.objects.filter(included=True, channel='x.nl').count(), 0)
+        self.assertEqual(EpgProgramme.objects.filter(included=True, channel='y.nl').count(), 2)
+        post(pk=ch.pk, action='clear')
+        self.assertEqual(EpgProgramme.objects.filter(included=True).count(), 0)
+
+
 class EpgManualMappingTests(EpgTestBase):
     def _post(self, **body):
         c = Client()
@@ -1145,7 +1248,8 @@ class EpgManualMappingTests(EpgTestBase):
         EpgChannel.objects.create(channel_id='a.nl', display_name='<i>A</i>')
         html = Client().get('/coverage').content.decode()
         self.assertIn('data-act="map"', html)
-        self.assertIn('id="epg-channels"', html)
+        self.assertIn('id="epgSuggest"', html)
+        self.assertIn('id="epg-data"', html)
         self.assertNotIn('<b>x</b>', html)
         self.assertNotIn('<i>A</i>', html)
 

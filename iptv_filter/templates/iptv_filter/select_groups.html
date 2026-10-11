@@ -1,11 +1,18 @@
 {% extends "iptv_filter/base.html" %}
 {% block title %}Groups{% endblock %}
-{% block heading %}Select IPTV groups to include{% endblock %}
+{% block heading %}Groups{% endblock %}
 
 {% block head %}
 <style>
-    .group-row.hidden { display: none; }
-    .group-row label { cursor: pointer; flex: 1; }
+    /* Bootstrap's d-flex etc. are !important, so the hiding rules have to be as well */
+    .group-row.hidden { display: none !important; }
+    .group-name { cursor: pointer; flex: 1; min-width: 0; overflow-wrap: anywhere; }
+    .group-panel { display: none; }
+    .group-row.open > .group-panel { display: block; }
+    .group-row.open .expand i { transform: rotate(90deg); }
+    .expand i { transition: transform .12s; display: inline-block; }
+    .channel-list { max-height: 420px; overflow-y: auto; }
+    .channel-list label { cursor: pointer; flex: 1; overflow-wrap: anywhere; }
 </style>
 {% endblock %}
 
@@ -17,83 +24,235 @@
 </div>
 {% endif %}
 
-<form action="/configure" method="post">
-    {% csrf_token %}
-    <div class="card mb-4">
-        <div class="card-header">
-            <div class="row g-2 align-items-center">
-                <div class="col-12 col-md">
-                    <input type="text" id="search" class="form-control" placeholder="Filter groups by name&hellip;" autocomplete="off">
-                </div>
-                <div class="col-auto">
-                    <button type="button" id="selectAllBtn" class="btn btn-outline-secondary btn-sm">Select visible</button>
-                    <button type="button" id="deselectAllBtn" class="btn btn-outline-secondary btn-sm">Deselect visible</button>
-                </div>
-                <div class="col-auto text-body-secondary small" id="count"></div>
+<p class="text-body-secondary">
+    Tick a group to include all of its channels, or open it (<i class="bi bi-chevron-right"></i>) to pick single channels.
+    A half-filled box means some of the group's channels are ticked. Changes are saved straight away.
+</p>
+
+<div id="status" class="small mb-2" role="status" aria-live="polite" style="min-height: 1.4em;"></div>
+
+<div class="card mb-4">
+    <div class="card-header">
+        <div class="row g-2 align-items-center">
+            <div class="col-12 col-md">
+                <input type="text" id="search" class="form-control" placeholder="Filter groups by name&hellip;" autocomplete="off">
             </div>
-        </div>
-        <div class="card-body p-0">
-            <ul class="list-group list-group-flush" id="groupList">
-                {% for tuple in group_includes %}
-                <li class="list-group-item d-flex align-items-center gap-2 group-row" data-search="{{ tuple.group_title|lower }}">
-                    <input class="form-check-input mt-0" type="checkbox" id="{{ tuple.group_title }}" name="{{ tuple.group_title }}"
-                        value="{{ tuple.group_title }}" {% if tuple.included == True %}checked{% endif %}>
-                    <label for="{{ tuple.group_title }}">{{ tuple.label }}</label>
-                </li>
-                {% endfor %}
-            </ul>
-            <div class="p-3 text-center text-body-secondary" id="noResults" style="display: none;">No groups match your search.</div>
-        </div>
-        <div class="card-footer">
-            <button type="submit" class="btn btn-primary"><i class="bi bi-save me-1"></i> Update Included Groups</button>
-            <span class="text-body-secondary small ms-2">For per-channel control instead, use <a href="/">Channels</a>.</span>
+            <div class="col-auto">
+                <button type="button" id="selectAllBtn" class="btn btn-outline-secondary btn-sm">Tick shown groups</button>
+                <button type="button" id="deselectAllBtn" class="btn btn-outline-secondary btn-sm">Untick shown groups</button>
+            </div>
+            <div class="col-auto text-body-secondary small" id="count"></div>
         </div>
     </div>
-</form>
+    <div class="card-body p-0">
+        <ul class="list-group list-group-flush" id="groupList">
+            {% for g in groups %}
+            <li class="list-group-item group-row" data-name="{{ g.name }}" data-search="{{ g.name|lower }}" data-total="{{ g.total }}" data-selected="{{ g.selected }}">
+                <div class="d-flex align-items-center gap-2">
+                    <input class="form-check-input mt-0 group-check" type="checkbox" aria-label="Include all channels of {{ g.name }}">
+                    <button type="button" class="btn btn-sm btn-link p-0 expand" aria-label="Show channels of {{ g.name }}" aria-expanded="false"><i class="bi bi-chevron-right"></i></button>
+                    <span class="group-name">{{ g.name }}</span>
+                    <span class="badge text-bg-secondary group-badge"></span>
+                </div>
+                <div class="group-panel mt-2 ms-4">
+                    <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
+                        <input type="text" class="form-control form-control-sm channel-search" style="max-width: 18rem;" placeholder="Filter channels in this group&hellip;" autocomplete="off">
+                        <button type="button" class="btn btn-sm btn-outline-secondary panel-select">Tick all</button>
+                        <button type="button" class="btn btn-sm btn-outline-secondary panel-deselect">Untick all</button>
+                        <span class="small text-body-secondary panel-info"></span>
+                    </div>
+                    <div class="channel-list border rounded"><ul class="list-group list-group-flush mb-0"></ul></div>
+                    <button type="button" class="btn btn-sm btn-outline-secondary mt-2 load-more" style="display: none;">Show more</button>
+                </div>
+            </li>
+            {% empty %}
+            <li class="list-group-item text-body-secondary">No groups yet. They appear after the playlist has been loaded.</li>
+            {% endfor %}
+        </ul>
+        <div class="p-3 text-center text-body-secondary" id="noResults" style="display: none;">No groups match your search.</div>
+    </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
 <script>
-    const searchInput = document.getElementById('search');
-    const rows = Array.from(document.querySelectorAll('.group-row'));
-    const noResults = document.getElementById('noResults');
-    const countEl = document.getElementById('count');
-    const totalGroups = rows.length;
+(function () {
+    var PAGE = 100;
+    var rows = Array.prototype.slice.call(document.querySelectorAll('.group-row[data-name]'));
+    var statusEl = document.getElementById('status');
+    var searchInput = document.getElementById('search');
+    var groups = {};
 
-    function visibleRows() {
-        return rows.filter(r => !r.classList.contains('hidden'));
+    function getCookie(name) {
+        var m = document.cookie.split(';').map(function (c) { return c.trim(); })
+            .filter(function (c) { return c.indexOf(name + '=') === 0; })[0];
+        return m ? decodeURIComponent(m.substring(name.length + 1)) : null;
     }
-
-    function updateCount() {
-        const checked = rows.filter(r => r.querySelector('input').checked).length;
-        countEl.textContent = `${checked} of ${totalGroups} groups selected`;
+    function say(text, kind) {
+        statusEl.className = 'small mb-2 text-' + (kind || 'body-secondary');
+        statusEl.textContent = text;
     }
-
-    function applyFilter() {
-        const term = searchInput.value.trim().toLowerCase();
-        let anyVisible = false;
-        rows.forEach(row => {
-            const match = !term || row.dataset.search.includes(term);
-            row.classList.toggle('hidden', !match);
-            if (match) anyVisible = true;
+    function api(url, body, keepalive) {
+        var opts = { method: body ? 'POST' : 'GET', headers: { 'X-CSRFToken': getCookie('csrftoken') || '' } };
+        if (body) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
+        if (keepalive) { opts.keepalive = true; }
+        return fetch(url, opts).then(function (r) {
+            return r.json().then(function (j) {
+                if (!r.ok || !j.ok) { throw new Error((j && j.error) || ('HTTP ' + r.status)); }
+                return j;
+            });
         });
-        noResults.style.display = anyVisible ? 'none' : 'block';
+    }
+    function fail(err) { say('Could not save: ' + err.message, 'danger'); }
+
+    // ---- per-group state ----------------------------------------------------
+    rows.forEach(function (el) {
+        groups[el.dataset.name] = {
+            name: el.dataset.name, el: el,
+            total: parseInt(el.dataset.total, 10), selected: parseInt(el.dataset.selected, 10),
+            offset: 0, shown: 0, query: '', loaded: false, token: 0
+        };
+    });
+    function list() { return rows.map(function (el) { return groups[el.dataset.name]; }); }
+
+    function paint(g) {
+        var cb = g.el.querySelector('.group-check');
+        cb.checked = g.total > 0 && g.selected === g.total;
+        cb.indeterminate = g.selected > 0 && g.selected < g.total;
+        g.el.querySelector('.group-badge').textContent = g.selected + ' / ' + g.total;
+        g.el.querySelector('.group-badge').className = 'badge group-badge text-bg-' + (g.selected === 0 ? 'secondary' : g.selected === g.total ? 'success' : 'primary');
+        updateCount();
+    }
+    function updateCount() {
+        var sel = 0, groupsOn = 0;
+        list().forEach(function (g) { sel += g.selected; if (g.selected) { groupsOn++; } });
+        document.getElementById('count').textContent = sel.toLocaleString() + ' channels selected in ' + groupsOn + ' of ' + rows.length + ' groups';
+    }
+    function applyCounts(map) {
+        Object.keys(map || {}).forEach(function (n) {
+            var g = groups[n];
+            if (g) { g.total = map[n].total; g.selected = map[n].selected; paint(g); }
+        });
     }
 
-    searchInput.addEventListener('input', applyFilter);
-
-    document.getElementById('selectAllBtn').addEventListener('click', () => {
-        visibleRows().forEach(r => { r.querySelector('input').checked = true; });
-        updateCount();
+    // ---- group filter -------------------------------------------------------
+    function visibleGroups() { return list().filter(function (g) { return !g.el.classList.contains('hidden'); }); }
+    searchInput.addEventListener('input', function () {
+        var term = searchInput.value.trim().toLowerCase(), any = false;
+        rows.forEach(function (row) {
+            var match = !term || row.dataset.search.indexOf(term) >= 0;
+            row.classList.toggle('hidden', !match);
+            if (match) { any = true; }
+        });
+        document.getElementById('noResults').style.display = any ? 'none' : 'block';
     });
 
-    document.getElementById('deselectAllBtn').addEventListener('click', () => {
-        visibleRows().forEach(r => { r.querySelector('input').checked = false; });
-        updateCount();
+    // ---- whole groups -------------------------------------------------------
+    function setGroups(gs, included, text) {
+        if (!gs.length) { return Promise.resolve(); }
+        say('Saving…');
+        var body = { groups: gs.map(function (g) { return g.name; }), included: included };
+        if (text) { body.q = text; }
+        return api('/groups/set', body).then(function (j) {
+            applyCounts(j.groups);
+            gs.forEach(function (g) { if (g.loaded) { loadChannels(g, true); } });
+            say('Saved' + (j.changed ? ' (' + j.changed.toLocaleString() + ' channels changed)' : ' (nothing to change)'), 'success');
+        }).catch(function (e) { fail(e); gs.forEach(paint); });
+    }
+    document.getElementById('selectAllBtn').addEventListener('click', function () { setGroups(visibleGroups(), true); });
+    document.getElementById('deselectAllBtn').addEventListener('click', function () { setGroups(visibleGroups(), false); });
+
+    // ---- channels inside a group -------------------------------------------
+    function loadChannels(g, reset) {
+        if (reset) { g.offset = 0; g.shown = 0; g.el.querySelector('.channel-list ul').textContent = ''; }
+        var ticket = ++g.token;
+        var url = '/groups/channels?group=' + encodeURIComponent(g.name) + '&q=' + encodeURIComponent(g.query) +
+                  '&offset=' + g.offset + '&limit=' + PAGE;
+        return api(url).then(function (j) {
+            if (ticket !== g.token) { return; }          // a newer request replaced this one
+            var ul = g.el.querySelector('.channel-list ul');
+            j.items.forEach(function (c) {
+                var li = document.createElement('li');
+                li.className = 'list-group-item d-flex align-items-center gap-2 py-1';
+                var cb = document.createElement('input');
+                cb.type = 'checkbox'; cb.className = 'form-check-input mt-0'; cb.checked = c.included;
+                cb.dataset.pk = c.pk; cb.id = 'ch' + c.pk;
+                var lb = document.createElement('label');
+                lb.setAttribute('for', cb.id); lb.textContent = c.name;
+                li.appendChild(cb); li.appendChild(lb); ul.appendChild(li);
+            });
+            g.offset += j.items.length; g.shown = g.offset; g.loaded = true;
+            g.total = j.group.total; g.selected = j.group.selected; paint(g);
+            var info = g.el.querySelector('.panel-info');
+            info.textContent = j.total === 0 ? 'No channels match.' :
+                'Showing ' + g.shown.toLocaleString() + ' of ' + j.total.toLocaleString() + (g.query ? ' matching' : '') + ' channels';
+            g.el.querySelector('.load-more').style.display = g.shown < j.total ? '' : 'none';
+            g.el.querySelector('.panel-select').textContent = g.query ? 'Tick all matching' : 'Tick all';
+            g.el.querySelector('.panel-deselect').textContent = g.query ? 'Untick all matching' : 'Untick all';
+        }).catch(fail);
+    }
+
+    // single channel ticks are collected for a moment and sent as one batch
+    var pending = {}, timer = null;
+    function flush(keepalive) {
+        clearTimeout(timer); timer = null;
+        var on = [], off = [];
+        Object.keys(pending).forEach(function (pk) { (pending[pk] ? on : off).push(parseInt(pk, 10)); });
+        pending = {};
+        var jobs = [];
+        if (on.length) { jobs.push(api('/groups/toggle', { pks: on, included: true }, keepalive)); }
+        if (off.length) { jobs.push(api('/groups/toggle', { pks: off, included: false }, keepalive)); }
+        if (!jobs.length) { return; }
+        say('Saving…');
+        Promise.all(jobs).then(function (res) {
+            res.forEach(function (j) { applyCounts(j.groups); });
+            say('Saved', 'success');
+        }).catch(fail);
+    }
+    window.addEventListener('pagehide', function () { if (timer) { flush(true); } });
+
+    document.getElementById('groupList').addEventListener('change', function (ev) {
+        var t = ev.target, row = t.closest('.group-row');
+        if (!row || !groups[row.dataset.name]) { return; }
+        var g = groups[row.dataset.name];
+        if (t.classList.contains('group-check')) { setGroups([g], t.checked); return; }
+        if (t.dataset.pk) {                                   // a single channel
+            pending[t.dataset.pk] = t.checked;
+            g.selected = Math.max(0, Math.min(g.total, g.selected + (t.checked ? 1 : -1)));
+            paint(g);
+            clearTimeout(timer); timer = setTimeout(flush, 600);
+            say('…');
+        }
     });
 
-    document.getElementById('groupList').addEventListener('change', updateCount);
+    document.getElementById('groupList').addEventListener('click', function (ev) {
+        var t = ev.target, row = t.closest('.group-row');
+        if (!row || !groups[row.dataset.name]) { return; }
+        var g = groups[row.dataset.name];
+        if (t.closest('.expand') || t.classList.contains('group-name')) {
+            var open = row.classList.toggle('open');
+            row.querySelector('.expand').setAttribute('aria-expanded', open ? 'true' : 'false');
+            if (open && !g.loaded) { loadChannels(g, true); }
+        } else if (t.classList.contains('load-more')) {
+            loadChannels(g, false);
+        } else if (t.classList.contains('panel-select')) {
+            flush(); setGroups([g], true, g.query);
+        } else if (t.classList.contains('panel-deselect')) {
+            flush(); setGroups([g], false, g.query);
+        }
+    });
 
+    var searchTimers = {};
+    document.getElementById('groupList').addEventListener('input', function (ev) {
+        var t = ev.target;
+        if (!t.classList.contains('channel-search')) { return; }
+        var g = groups[t.closest('.group-row').dataset.name];
+        clearTimeout(searchTimers[g.name]);
+        searchTimers[g.name] = setTimeout(function () { g.query = t.value.trim(); loadChannels(g, true); }, 250);
+    });
+
+    list().forEach(paint);
     updateCount();
+})();
 </script>
 {% endblock %}
