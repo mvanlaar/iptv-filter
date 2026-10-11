@@ -675,7 +675,7 @@ from datetime import timedelta
 from unittest import mock
 
 from iptv_filter import logo_cache
-from iptv_filter.models import LogoCache, EpgMapping
+from iptv_filter.models import LogoCache, EpgMapping, RadioChannel
 
 PNG = b'\x89PNG\r\n\x1a\n' + b'x' * 200
 
@@ -1088,8 +1088,8 @@ class GroupsDrilldownTests(EpgTestBase):
     def test_group_list_has_counts_and_states(self):
         PlaylistChannel.objects.filter(pk=self.a1.pk).update(included=True)
         html = self.c.get('/configure').content.decode()
-        self.assertIn('data-name="GA" data-search="ga" data-total="3" data-selected="1"', html)
-        self.assertIn('data-name="GB" data-search="gb" data-total="1" data-selected="0"', html)
+        self.assertIn('data-name="GA" data-total="3" data-selected="1"', html)
+        self.assertIn('data-name="GB" data-total="1" data-selected="0"', html)
 
     def test_channel_page_with_filter_and_paging(self):
         r = self.c.get('/groups/channels', {'group': 'GA'}).json()
@@ -1123,6 +1123,26 @@ class GroupsDrilldownTests(EpgTestBase):
         self.assertEqual(self._post('/groups/set', groups='GA', included=True).status_code, 400)
         self.assertEqual(self.c.get('/groups/set').status_code, 405)
 
+    def test_group_tick_syncs_only_the_affected_guide_ids(self):
+        self._epg('npo1.nl', programmes=2)
+        self._epg('cnn.nl', programmes=1)
+        self._epg('unrelated.nl', programmes=1)
+        EpgProgramme.objects.update(included=True)               # pretend everything was flagged
+        EpgChannel.objects.update(included=True)
+        self._post('/groups/set', groups=['GA'], included=True)
+        self.assertEqual(EpgProgramme.objects.filter(channel='npo1.nl', included=True).count(), 2)
+        self.assertTrue(EpgProgramme.objects.get(channel='unrelated.nl').included)   # not re-checked: left as it was
+        self.assertTrue(EpgProgramme.objects.get(channel='cnn.nl').included)
+        self._post('/groups/set', groups=['GA'], included=False)
+        self.assertEqual(EpgProgramme.objects.filter(channel='npo1.nl', included=True).count(), 0)
+
+    def test_group_without_ids_and_case_variants(self):
+        self._pc('VOD movie', '', group='VOD')
+        self._epg('NPO1.nl', programmes=1)
+        self._post('/groups/set', groups=['VOD'], included=True)          # nothing to sync, must not fail
+        self._post('/groups/set', groups=['GA'], included=True)           # npo1.nl -> EPG spells it NPO1.nl
+        self.assertEqual(EpgProgramme.objects.filter(channel='NPO1.nl', included=True).count(), 1)
+
     def test_group_tick_keeps_other_groups_and_is_idempotent(self):
         self._post('/groups/set', groups=['GB'], included=True)
         r = self._post('/groups/set', groups=['GA'], included=True).json()
@@ -1137,6 +1157,60 @@ class GroupsDrilldownTests(EpgTestBase):
     def test_names_are_escaped(self):
         self._pc('x', 'x', group='<script>alert(1)</script>')
         self.assertNotIn('<script>alert(1)</script>', self.c.get('/configure').content.decode())
+
+
+class RadioFlagTests(EpgTestBase):
+    def setUp(self):
+        self.a = self._pc('3FM', '', included=True, group='RADIO')
+        self.b = self._pc('Radio 538', '', included=True, group='RADIO')
+        self.c = self._pc('NPO 1', 'npo1.nl', included=True, group='TV')
+        self.cl = Client()
+
+    def _post(self, **body):
+        return self.cl.post('/groups/radio', data=json.dumps(body), content_type='application/json')
+
+    def test_default_is_not_radio(self):
+        body = self.cl.get('/m3u').content.decode()
+        self.assertNotIn('radio=', body)
+
+    def test_single_toggle_outputs_radio_attribute_only_for_that_channel(self):
+        self.assertEqual(self._post(pks=[self.a.pk], radio=True).json()['count'], 1)
+        lines = [l for l in self.cl.get('/m3u').content.decode().split('\r\n') if l.startswith('#EXTINF')]
+        radio = [l for l in lines if 'radio="true"' in l]
+        self.assertEqual(len(radio), 1)
+        self.assertIn('tvg-name="3FM"', radio[0])
+        self._post(pks=[self.a.pk], radio=False)
+        self.assertNotIn('radio=', self.cl.get('/m3u').content.decode())
+
+    def test_group_and_filtered_bulk_and_listing(self):
+        self._post(group='RADIO', radio=True)
+        self.assertEqual(RadioChannel.objects.count(), 2)
+        self._post(group='RADIO', q='538', radio=False)
+        self.assertEqual(sorted(RadioChannel.objects.values_list('tvg_name', flat=True)), ['3FM'])
+        items = self.cl.get('/groups/channels', {'group': 'RADIO'}).json()['items']
+        self.assertEqual({i['name']: i['radio'] for i in items}, {'3FM': True, 'Radio 538': False})
+        self._post(group='RADIO', radio=True)                    # idempotent
+        self.assertEqual(RadioChannel.objects.count(), 2)
+
+    def test_flag_survives_by_name_and_does_not_need_ticking(self):
+        PlaylistChannel.objects.filter(pk=self.a.pk).update(included=False)
+        self._post(pks=[self.a.pk], radio=True)
+        self.assertNotIn('3FM', self.cl.get('/m3u').content.decode())       # unticked channels are not output at all
+        PlaylistChannel.objects.filter(pk=self.a.pk).update(included=True)
+        self.assertIn('radio="true"', self.cl.get('/m3u').content.decode())
+
+    def test_bad_requests(self):
+        self.assertEqual(self._post(radio='yes', pks=[1]).status_code, 400)
+        self.assertEqual(self._post(radio=True).status_code, 400)
+        self.assertEqual(self._post(radio=True, pks=['x']).status_code, 400)
+        self.assertEqual(self.cl.get('/groups/radio').status_code, 405)
+
+    def test_many_channels_in_chunks(self):
+        PlaylistChannel.objects.bulk_create([PlaylistChannel(tvg_name=f'big{i}', tvg_id='', group_title='BIG', stream_url='http://x') for i in range(1300)])
+        self._post(group='BIG', radio=True)
+        self.assertEqual(RadioChannel.objects.filter(tvg_name__startswith='big').count(), 1300)
+        self._post(group='BIG', radio=False)
+        self.assertEqual(RadioChannel.objects.filter(tvg_name__startswith='big').count(), 0)
 
 
 class GroupsFilterTests(EpgTestBase):

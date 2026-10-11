@@ -11,7 +11,7 @@ from django.db import OperationalError
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.db.models import Count, Q
 from django.core import serializers
-from iptv_filter.models import PlaylistChannel, CachedFile, EpgChannel, EpgProgramme, EpgMapping, AppConfig, LogoCache
+from iptv_filter.models import PlaylistChannel, CachedFile, EpgChannel, EpgProgramme, EpgMapping, RadioChannel, AppConfig, LogoCache
 from iptv_filter import __version__, settings_store, logo_cache, epg_quality
 from iptv_updater import iptv_updater
 from django.utils import timezone
@@ -85,7 +85,7 @@ def channel_api(request, id=-1):
                 ch.save()
                 try:
                     # Guide data follows the selection immediately (not at the next hourly EPG refresh).
-                    epg_quality.sync_flags()
+                    epg_quality.sync_for([(ch.tvg_name, ch.tvg_id)])
                 except OperationalError:
                     logger.warning("Could not update EPG flags right now (database busy); the next EPG refresh will.")
                 logo_cache.request_sync()  # (debounced) cache the logo of a newly ticked channel
@@ -125,10 +125,12 @@ def m3u_api(request):
         logger.exception("Could not work out tvg-id corrections; serving the ids as given")
         id_fix = {}
 
+    radio_names = set(RadioChannel.objects.values_list('tvg_name', flat=True))
+
     parts = ["#EXTM3U\r\n"]
     for c in included_channels:
         parts.append(c.to_m3u(logo_cache.local_logo_url(base, c.tvg_logo, lookup) if lookup else None,
-                              id_fix.get(c.pk)))
+                              id_fix.get(c.pk), c.tvg_name in radio_names))
         parts.append("\r\n")
     m3u = "".join(parts)
 
@@ -211,9 +213,14 @@ def _group_counts(names):
     return out
 
 
-def _selection_changed():
+def _selection_changed(changed_rows=None):
+    """Guide data and logos follow a selection change. changed_rows are the
+    (tvg_name, tvg_id) of the channels that changed, so only their guide entries are re-checked."""
     try:
-        epg_quality.sync_flags()
+        if changed_rows is None:
+            epg_quality.sync_flags()
+        else:
+            epg_quality.sync_for(changed_rows)
     except OperationalError:
         logger.warning("Could not update EPG flags right now (database busy); the next EPG refresh will.")
     logo_cache.request_sync()
@@ -242,8 +249,9 @@ def groups_channels(request):
     if text:
         qs = qs.filter(tvg_name__icontains=text)
     total = qs.count()
-    items = [{'pk': pk, 'name': name, 'included': bool(inc)}
-             for pk, name, inc in qs.order_by('tvg_name').values_list('pk', 'tvg_name', 'included')[offset:offset + limit]]
+    page = list(qs.order_by('tvg_name').values_list('pk', 'tvg_name', 'included')[offset:offset + limit])
+    radio = set(RadioChannel.objects.filter(tvg_name__in=[n for _, n, _ in page]).values_list('tvg_name', flat=True))
+    items = [{'pk': pk, 'name': name, 'included': bool(inc), 'radio': name in radio} for pk, name, inc in page]
     counts = _group_counts([group]).get(group, {'total': 0, 'selected': 0})
     return JsonResponse({'ok': True, 'total': total, 'items': items, 'group': counts,
                          'matching_selected': qs.filter(included=True).count() if text else counts['selected']})
@@ -264,11 +272,13 @@ def groups_set(request):
         if len(groups) != 1:
             return JsonResponse({'ok': False, 'error': 'A filter text needs exactly one group.'}, status=400)
         qs = qs.filter(tvg_name__icontains=text)
-    changed = qs.exclude(included=data['included']).update(included=data['included'])
+    todo = qs.exclude(included=data['included'])
+    rows = list(todo.values_list('tvg_name', 'tvg_id'))
+    changed = todo.update(included=data['included'])
     logger.info(f"Groups {'ticked' if data['included'] else 'unticked'}: {len(groups)} group(s)"
                 f"{' (filter ' + repr(text) + ')' if text else ''}, {changed} channel(s) changed")
     if changed:
-        _selection_changed()
+        _selection_changed(rows)
     return JsonResponse({'ok': True, 'changed': changed, 'groups': _group_counts(groups)})
 
 
@@ -282,10 +292,43 @@ def groups_toggle(request):
         return JsonResponse({'ok': False, 'error': 'Expected {pks: [...], included: true|false}.'}, status=400)
     pks = pks[:5000]
     affected = set(PlaylistChannel.objects.filter(pk__in=pks).values_list('group_title', flat=True))
-    changed = PlaylistChannel.objects.filter(pk__in=pks).exclude(included=data['included']).update(included=data['included'])
+    todo = PlaylistChannel.objects.filter(pk__in=pks).exclude(included=data['included'])
+    rows = list(todo.values_list('tvg_name', 'tvg_id'))
+    changed = todo.update(included=data['included'])
     if changed:
-        _selection_changed()
+        _selection_changed(rows)
     return JsonResponse({'ok': True, 'changed': changed, 'groups': _group_counts(affected)})
+
+
+RADIO_CHUNK = 500   # names per SQL statement (SQLite limits the number of parameters)
+
+
+def groups_radio(request):
+    """POST {radio: bool, pks: [ids]} or {radio: bool, group: name, q?: text}: mark channels
+    as radio (or not). Radio channels get radio="true" in /m3u, which Kodi lists under Radio."""
+    if request.method != 'POST':
+        return HttpResponse(status=405)
+    data = _json_body(request)
+    if data is None or not isinstance(data.get('radio'), bool):
+        return JsonResponse({'ok': False, 'error': 'Expected {radio: true|false, pks: [...]} or {radio: ..., group: ...}.'}, status=400)
+    if isinstance(data.get('pks'), list) and all(isinstance(i, int) for i in data['pks']):
+        qs = PlaylistChannel.objects.filter(pk__in=data['pks'][:5000])
+    elif isinstance(data.get('group'), str):
+        qs = PlaylistChannel.objects.filter(group_title=data['group'])
+        text = str(data.get('q') or '').strip()
+        if text:
+            qs = qs.filter(tvg_name__icontains=text)
+    else:
+        return JsonResponse({'ok': False, 'error': 'Give pks or a group.'}, status=400)
+    names = list(qs.values_list('tvg_name', flat=True))
+    for i in range(0, len(names), RADIO_CHUNK):
+        chunk = names[i:i + RADIO_CHUNK]
+        if data['radio']:
+            RadioChannel.objects.bulk_create([RadioChannel(tvg_name=n) for n in chunk], ignore_conflicts=True)
+        else:
+            RadioChannel.objects.filter(tvg_name__in=chunk).delete()
+    logger.info(f"{len(names)} channel(s) marked as {'radio' if data['radio'] else 'not radio'}")
+    return JsonResponse({'ok': True, 'count': len(names)})
 
 
 def _status_payload():

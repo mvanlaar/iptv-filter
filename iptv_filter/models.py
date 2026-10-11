@@ -45,20 +45,28 @@ class PlaylistChannel(models.Model):
         constraints = [
             models.UniqueConstraint(fields=['tvg_name'],name="unique name for PlaylistChannel")
         ]
+        indexes = [
+            # The Groups page counts channels per group and how many are ticked, lists
+            # one group's channels and ticks whole groups. This index answers the counts
+            # without reading the rows and finds a group's rows directly.
+            models.Index(fields=['group_title', 'included'], name='plc_group_included_idx'),
+        ]
 
     def __str__(self):
         return self.to_m3u()
 
-    def to_m3u(self, logo_override=None, id_override=None):
+    def to_m3u(self, logo_override=None, id_override=None, radio=False):
         """The #EXTINF + URL lines for this channel. logo_override replaces the
         stored logo URL (used to point at the local logo cache); id_override
-        replaces the tvg-id (letter-case correction towards the EPG)."""
+        replaces the tvg-id (letter-case correction towards the EPG); radio adds
+        radio="true" so players such as Kodi list it as a radio channel."""
         tvg_id = _m3u_safe(self.tvg_id if id_override is None else id_override)
         tvg_name = _m3u_safe(self.tvg_name)
         tvg_logo = _m3u_safe(self.tvg_logo if logo_override is None else logo_override)
         group_title = _m3u_safe(self.group_title)
         stream_url = _m3u_safe(self.stream_url)
-        text = f"#EXTINF:-1 tvg-id=\"{tvg_id}\" tvg-name=\"{tvg_name}\" tvg-logo=\"{tvg_logo}\" group-title=\"{group_title}\",{tvg_name}\r\n"
+        radio_attr = ' radio="true"' if radio else ''
+        text = f"#EXTINF:-1 tvg-id=\"{tvg_id}\" tvg-name=\"{tvg_name}\" tvg-logo=\"{tvg_logo}\"{radio_attr} group-title=\"{group_title}\",{tvg_name}\r\n"
         text += stream_url
         return text
 
@@ -122,3 +130,9 @@ class EpgMapping(models.Model):
     epg_id = models.CharField(max_length=50, blank=True, default='')
     no_guide = models.BooleanField(default=False)
     updated = models.DateTimeField(auto_now=True)
+
+
+class RadioChannel(models.Model):
+    """Playlist channels the user marked as radio (default: not radio). Keyed by the
+    unique channel name, like EpgMapping, so the choice survives playlist re-imports."""
+    tvg_name = models.CharField(max_length=100, unique=True)

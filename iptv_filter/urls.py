@@ -16,6 +16,7 @@ urlpatterns = [
     path('groups/channels', views.groups_channels, name='groups_channels'),
     path('groups/set', views.groups_set, name='groups_set'),
     path('groups/toggle', views.groups_toggle, name='groups_toggle'),
+    path('groups/radio', views.groups_radio, name='groups_radio'),
     path('channels', views.channel_api, name='channel_api'),
     path('channels/<int:id>', views.channel_api, name='channel_api_with_id'),
     path('status', views.status_api, name='status_api'),

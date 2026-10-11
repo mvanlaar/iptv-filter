@@ -13,6 +13,7 @@
     .expand i { transition: transform .12s; display: inline-block; }
     .channel-list { max-height: 420px; overflow-y: auto; }
     .channel-list label { cursor: pointer; flex: 1; overflow-wrap: anywhere; }
+    .radio-toggle { --bs-btn-padding-y: .05rem; --bs-btn-padding-x: .4rem; }
 </style>
 {% endblock %}
 
@@ -47,28 +48,33 @@
     <div class="card-body p-0">
         <ul class="list-group list-group-flush" id="groupList">
             {% for g in groups %}
-            <li class="list-group-item group-row" data-name="{{ g.name }}" data-search="{{ g.name|lower }}" data-total="{{ g.total }}" data-selected="{{ g.selected }}">
+            <li class="list-group-item group-row" data-name="{{ g.name }}" data-total="{{ g.total }}" data-selected="{{ g.selected }}">
                 <div class="d-flex align-items-center gap-2">
-                    <input class="form-check-input mt-0 group-check" type="checkbox" aria-label="Include all channels of {{ g.name }}">
-                    <button type="button" class="btn btn-sm btn-link p-0 expand" aria-label="Show channels of {{ g.name }}" aria-expanded="false"><i class="bi bi-chevron-right"></i></button>
+                    <input class="form-check-input mt-0 group-check" type="checkbox">
+                    <button type="button" class="btn btn-sm btn-link p-0 expand" aria-expanded="false"><i class="bi bi-chevron-right"></i></button>
                     <span class="group-name">{{ g.name }}</span>
                     <span class="badge text-bg-secondary group-badge"></span>
-                </div>
-                <div class="group-panel mt-2 ms-4">
-                    <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
-                        <input type="text" class="form-control form-control-sm channel-search" style="max-width: 18rem;" placeholder="Filter channels in this group&hellip;" autocomplete="off">
-                        <button type="button" class="btn btn-sm btn-outline-secondary panel-select">Tick all</button>
-                        <button type="button" class="btn btn-sm btn-outline-secondary panel-deselect">Untick all</button>
-                        <span class="small text-body-secondary panel-info"></span>
-                    </div>
-                    <div class="channel-list border rounded"><ul class="list-group list-group-flush mb-0"></ul></div>
-                    <button type="button" class="btn btn-sm btn-outline-secondary mt-2 load-more" style="display: none;">Show more</button>
                 </div>
             </li>
             {% empty %}
             <li class="list-group-item text-body-secondary">No groups yet. They appear after the playlist has been loaded.</li>
             {% endfor %}
         </ul>
+        <template id="panelTpl">
+            <div class="group-panel mt-2 ms-4">
+                <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
+                    <input type="text" class="form-control form-control-sm channel-search" style="max-width: 18rem;" placeholder="Filter channels in this group&hellip;" autocomplete="off" aria-label="Filter channels in this group">
+                    <button type="button" class="btn btn-sm btn-outline-secondary panel-select">Tick all</button>
+                    <button type="button" class="btn btn-sm btn-outline-secondary panel-deselect">Untick all</button>
+                    <span class="vr d-none d-md-block"></span>
+                    <button type="button" class="btn btn-sm btn-outline-secondary panel-radio-on" title="Mark as radio: Kodi lists these under Radio"><i class="bi bi-boombox"></i> <span>Radio: all</span></button>
+                    <button type="button" class="btn btn-sm btn-outline-secondary panel-radio-off"><span>Not radio: all</span></button>
+                    <span class="small text-body-secondary panel-info"></span>
+                </div>
+                <div class="channel-list border rounded"><ul class="list-group list-group-flush mb-0"></ul></div>
+                <button type="button" class="btn btn-sm btn-outline-secondary mt-2 load-more" style="display: none;">Show more</button>
+            </div>
+        </template>
         <div class="p-3 text-center text-body-secondary" id="noResults" style="display: none;">No groups match your search.</div>
     </div>
 </div>
@@ -113,6 +119,15 @@
             offset: 0, shown: 0, query: '', loaded: false, token: 0
         };
     });
+    rows.forEach(function (el) {
+        el.querySelector('.group-check').setAttribute('aria-label', 'Include all channels of ' + el.dataset.name);
+        el.querySelector('.expand').setAttribute('aria-label', 'Show channels of ' + el.dataset.name);
+    });
+    function ensurePanel(g) {
+        if (!g.el.querySelector('.group-panel')) {
+            g.el.appendChild(document.getElementById('panelTpl').content.cloneNode(true));
+        }
+    }
     function list() { return rows.map(function (el) { return groups[el.dataset.name]; }); }
 
     function paint(g) {
@@ -140,7 +155,7 @@
     searchInput.addEventListener('input', function () {
         var term = searchInput.value.trim().toLowerCase(), any = false;
         rows.forEach(function (row) {
-            var match = !term || row.dataset.search.indexOf(term) >= 0;
+            var match = !term || row.dataset.name.toLowerCase().indexOf(term) >= 0;
             row.classList.toggle('hidden', !match);
             if (match) { any = true; }
         });
@@ -164,6 +179,7 @@
 
     // ---- channels inside a group -------------------------------------------
     function loadChannels(g, reset) {
+        ensurePanel(g);
         if (reset) { g.offset = 0; g.shown = 0; g.el.querySelector('.channel-list ul').textContent = ''; }
         var ticket = ++g.token;
         var url = '/groups/channels?group=' + encodeURIComponent(g.name) + '&q=' + encodeURIComponent(g.query) +
@@ -179,7 +195,13 @@
                 cb.dataset.pk = c.pk; cb.id = 'ch' + c.pk;
                 var lb = document.createElement('label');
                 lb.setAttribute('for', cb.id); lb.textContent = c.name;
-                li.appendChild(cb); li.appendChild(lb); ul.appendChild(li);
+                var rb = document.createElement('button');
+                rb.type = 'button'; rb.className = 'btn btn-sm radio-toggle ' + (c.radio ? 'btn-primary' : 'btn-outline-secondary');
+                rb.dataset.radioPk = c.pk; rb.dataset.on = c.radio ? '1' : '';
+                rb.title = 'Radio channel (Kodi lists it under Radio)'; rb.setAttribute('aria-pressed', c.radio ? 'true' : 'false');
+                rb.setAttribute('aria-label', 'Radio channel: ' + c.name);
+                var ic = document.createElement('i'); ic.className = 'bi bi-boombox'; rb.appendChild(ic);
+                li.appendChild(cb); li.appendChild(lb); li.appendChild(rb); ul.appendChild(li);
             });
             g.offset += j.items.length; g.shown = g.offset; g.loaded = true;
             g.total = j.group.total; g.selected = j.group.selected; paint(g);
@@ -189,6 +211,8 @@
             g.el.querySelector('.load-more').style.display = g.shown < j.total ? '' : 'none';
             g.el.querySelector('.panel-select').textContent = g.query ? 'Tick all matching' : 'Tick all';
             g.el.querySelector('.panel-deselect').textContent = g.query ? 'Untick all matching' : 'Untick all';
+            g.el.querySelector('.panel-radio-on span').textContent = g.query ? 'Radio: all matching' : 'Radio: all';
+            g.el.querySelector('.panel-radio-off span').textContent = g.query ? 'Not radio: all matching' : 'Not radio: all';
         }).catch(fail);
     }
 
@@ -229,9 +253,14 @@
         var t = ev.target, row = t.closest('.group-row');
         if (!row || !groups[row.dataset.name]) { return; }
         var g = groups[row.dataset.name];
+        var rt = t.closest('.radio-toggle');
+        if (rt) { toggleRadio(rt); return; }
+        var bulk = t.closest('.panel-radio-on, .panel-radio-off');
+        if (bulk) { bulkRadio(g, bulk.classList.contains('panel-radio-on')); return; }
         if (t.closest('.expand') || t.classList.contains('group-name')) {
             var open = row.classList.toggle('open');
             row.querySelector('.expand').setAttribute('aria-expanded', open ? 'true' : 'false');
+            if (open) { ensurePanel(g); }
             if (open && !g.loaded) { loadChannels(g, true); }
         } else if (t.classList.contains('load-more')) {
             loadChannels(g, false);
@@ -241,6 +270,30 @@
             flush(); setGroups([g], false, g.query);
         }
     });
+
+    // ---- radio flag (Kodi: radio="true") --------------------------------------
+    function showRadio(btn, on) {
+        btn.dataset.on = on ? '1' : '';
+        btn.className = 'btn btn-sm radio-toggle ' + (on ? 'btn-primary' : 'btn-outline-secondary');
+        btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    }
+    function toggleRadio(btn) {
+        var on = !btn.dataset.on;
+        showRadio(btn, on);
+        say('Saving…');
+        api('/groups/radio', { pks: [parseInt(btn.dataset.radioPk, 10)], radio: on })
+            .then(function () { say(on ? 'Marked as radio' : 'Not radio any more', 'success'); })
+            .catch(function (e) { showRadio(btn, !on); fail(e); });
+    }
+    function bulkRadio(g, on) {
+        say('Saving…');
+        api('/groups/radio', { group: g.name, q: g.query, radio: on }).then(function (j) {
+            Array.prototype.forEach.call(g.el.querySelectorAll('.radio-toggle'), function (b) {
+                if (!g.query || b.closest('li').querySelector('label').textContent.toLowerCase().indexOf(g.query.toLowerCase()) >= 0) { showRadio(b, on); }
+            });
+            say((on ? 'Marked as radio: ' : 'Not radio: ') + j.count.toLocaleString() + ' channels', 'success');
+        }).catch(fail);
+    }
 
     var searchTimers = {};
     document.getElementById('groupList').addEventListener('input', function (ev) {

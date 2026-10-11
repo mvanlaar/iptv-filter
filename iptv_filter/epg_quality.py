@@ -157,6 +157,33 @@ def suggest(rows, epg_channels, threshold=0.88):
             row['suggest'] = {'epg_id': best[0], 'name': best[1], 'score': round(best[2] * 100)}
 
 
+def related_epg_ids(channel_rows):
+    """EPG channel ids whose "included" flag can change when the given playlist
+    channels (an iterable of (tvg_name, tvg_id)) are ticked or unticked: their own
+    tvg-ids, the spelling the EPG uses for them (letter case) and the targets of
+    manual mappings. Lets a selection change update only those few ids instead of
+    re-checking the whole guide."""
+    channel_rows = list(channel_rows)
+    ids = {tid for _, tid in channel_rows if tid}
+    manual = manual_mappings()
+    ids |= {manual[n][0] for n, _ in channel_rows if n in manual and manual[n][0]}
+    lowered = {i.lower() for i in ids}
+    if lowered:
+        ids |= {cid for cid in EpgChannel.objects.values_list('channel_id', flat=True) if cid.lower() in lowered}
+    return ids
+
+
+MAX_TARGETED = 20000   # beyond this many ids a full sync is simpler than a huge IN (...)
+
+
+def sync_for(channel_rows):
+    """Bring the guide flags in line after these playlist channels changed state."""
+    ids = related_epg_ids(channel_rows)
+    if not ids:
+        return 0
+    return sync_flags(only=ids) if len(ids) <= MAX_TARGETED else sync_flags()
+
+
 def _selected_ids():
     """Subquery of the tvg-ids of ticked playlist channels (empty ids ignored)."""
     return PlaylistChannel.objects.filter(included=True).exclude(tvg_id='').values('tvg_id')
