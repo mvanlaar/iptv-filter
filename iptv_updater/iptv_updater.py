@@ -1,3 +1,4 @@
+import io
 import os
 import requests
 import re
@@ -102,16 +103,6 @@ def _mask(text):
     text = _url_secret_param.sub(r'\1***', text)
     return _url_user_param.sub(r'\1***', text)
 
-def _decode(r):
-    # r.text runs charset detection (chardet) over the whole body when the
-    # server doesn't declare one, which is very slow on 30+ MB files.
-    if r.encoding is None:
-        try:
-            return r.content.decode('utf-8')
-        except UnicodeDecodeError:
-            return r.content.decode('latin-1')
-    return r.text
-
 # "m3u" and "epg" for now...
 def _retrieve(filetype):
     configs = AppConfig.objects.filter(key=filetype+"_url")
@@ -136,21 +127,38 @@ def _retrieve(filetype):
         _record_error(filetype, msg)
         return False
 
-    data = _decode(r).encode()
+    # Store the raw bytes as received (no decode/encode round trip: a provider
+    # playlist can be hundreds of MB, and r.text would also run slow charset
+    # detection or mis-decode when the server defaults to ISO-8859-1).
+    data = r.content
     now = timezone.now()
     CachedFile.objects.update_or_create(file_type=filetype, defaults={'file':data, 'last_updated':now})
     logger.info(f"Received fresh {filetype} file, size {len(data)} in {time.monotonic()-started:.1f}s")
     _last_error.pop(filetype, None)
     return True
 
-@transaction.atomic
 def _update_tables(filetype):
+    # EPG is small enough to apply in one transaction. The M3U update is applied
+    # in small batches instead (see _update_tables_impl): a single transaction
+    # over a very large playlist holds SQLite's write lock for minutes and makes
+    # every other request fail with "database is locked".
+    if filetype == 'm3u':
+        return _update_tables_impl(filetype)
+    with transaction.atomic():
+        return _update_tables_impl(filetype)
+
+WRITE_BATCH = 2000
+SKIP_VOD_RE = re.compile(r'(?i)^[a-z]+://[^/]+/(?:[^/]+/)?(?:movie|series)/')
+
+def _update_tables_impl(filetype):
     now = timezone.now()
     cached = CachedFile.objects.filter(file_type=filetype)
     if not cached:
         logger.warning(f"No cached {filetype} file to process yet - skipping table update.")
         return False
-    file = cached[0].file.decode()
+    blob = cached[0].file
+    if filetype != 'm3u':
+        file = blob.decode()
 
     if filetype == 'm3u':
         # Real-world M3U sources don't agree on attribute order (or even which
@@ -170,8 +178,13 @@ def _update_tables(filetype):
         # (last one wins), which also protects bulk_create from the unique
         # constraint on tvg_name.
         parsed = {}
+        skip_vod = bool(os.environ.get('IPTV_SKIP_VOD'))
+        skipped_vod = 0
         pending_extinf = None  # Reset so a stray/duplicate URL line can't reuse a stale channel from a previous iteration.
-        for line in file.splitlines():
+        # Iterate the raw bytes line by line instead of decoding + splitlines():
+        # that would hold 2-3 extra copies of a (possibly 300+ MB) playlist in memory.
+        for raw in io.BytesIO(blob):
+            line = raw.decode('utf-8', errors='replace').rstrip('\r\n')
             if extinf_pattern.match(line):
                 # This was an #EXTINF line.
                 attrs = dict(attr_pattern.findall(line))
@@ -194,6 +207,10 @@ def _update_tables(filetype):
 
             else:
                 if urlpattern.match(line) and pending_extinf is not None:
+                    if skip_vod and SKIP_VOD_RE.match(line):
+                        skipped_vod += 1
+                        pending_extinf = None
+                        continue
                     # This is the URL line.
                     pending_extinf['stream_url'] = line
                     parsed[pending_extinf['tvg_name']] = pending_extinf
@@ -230,17 +247,25 @@ def _update_tables(filetype):
                     group_title=pdata['group_title'], stream_url=pdata['stream_url'],
                     last_updated=now, first_seen=now, included=False))
 
-        stale_names = existing.keys() - parsed.keys()
-        if stale_names:
-            PlaylistChannel.objects.filter(tvg_name__in=stale_names).delete()
-        if to_create:
-            PlaylistChannel.objects.bulk_create(to_create)
-        if to_update:
-            PlaylistChannel.objects.bulk_update(to_update, ['tvg_id', 'tvg_logo', 'group_title', 'stream_url', 'last_updated'])
+        stale_pks = [existing[n]['pk'] for n in existing.keys() - parsed.keys()]
+
+        # Apply in small batches, each in its own short transaction, so the
+        # web UI can keep reading and writing while a big update runs.
+        for i in range(0, len(stale_pks), WRITE_BATCH):
+            with transaction.atomic():
+                PlaylistChannel.objects.filter(pk__in=stale_pks[i:i+WRITE_BATCH]).delete()
+        for i in range(0, len(to_create), WRITE_BATCH):
+            with transaction.atomic():
+                PlaylistChannel.objects.bulk_create(to_create[i:i+WRITE_BATCH])
+        for i in range(0, len(to_update), WRITE_BATCH):
+            with transaction.atomic():
+                PlaylistChannel.objects.bulk_update(to_update[i:i+WRITE_BATCH], ['tvg_id', 'tvg_logo', 'group_title', 'stream_url', 'last_updated'])
+        if skipped_vod:
+            logger.info(f"Skipped {skipped_vod} movie/series entries (IPTV_SKIP_VOD is set).")
 
         logging.info(
             f"Done with Channels in {time.perf_counter()-start_perftime} seconds. "
-            f"({len(to_create)} new, {len(to_update)} changed, {len(stale_names)} removed, "
+            f"({len(to_create)} new, {len(to_update)} changed, {len(stale_pks)} removed, "
             f"{len(parsed)-len(to_create)-len(to_update)} unchanged)"
         )
 
