@@ -5,6 +5,7 @@ import json
 import xml.etree.ElementTree as ET
 from django.shortcuts import render
 from django.http import HttpResponse, StreamingHttpResponse, FileResponse
+from django.db import OperationalError
 from django.db.models import Count
 from django.core import serializers
 from iptv_filter.models import PlaylistChannel, CachedFile, EpgChannel, EpgProgramme, AppConfig
@@ -58,7 +59,12 @@ def channel_api(request, id=-1):
         else:
             last_visit = timezone.now()
 
-        AppConfig.objects.update_or_create(key='last_visit', defaults={'value':timezone.now(), 'last_updated':timezone.now()})
+        try:
+            AppConfig.objects.update_or_create(key='last_visit', defaults={'value':timezone.now(), 'last_updated':timezone.now()})
+        except OperationalError:
+            # Only bookkeeping for the "new" column; never fail the page because
+            # the database is busy (e.g. during a large background update).
+            logger.warning("Could not record last_visit (database busy).")
 
         return StreamingHttpResponse(_channel_json_stream(last_visit), content_type='application/json')
 
