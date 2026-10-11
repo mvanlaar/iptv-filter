@@ -37,6 +37,7 @@ Run the container: `docker-compose up`
 * `export IPTV_M3U_URL="<your_m3u_url>"`
 * `export IPTV_EPG_URL="<your_epg_url>"`
 * `export TZ="Europe/Amsterdam"` (optional - controls how times are displayed, e.g. in the admin site and the `runserver` startup banner; defaults to `Europe/Amsterdam` if not set)
+* The M3U and EPG URLs may point to gzip-compressed files (e.g. `https://example.org/epg.xml.gz`); they are detected by content and unpacked automatically. `export IPTV_MAX_UNPACKED_MB=1024` (optional) sets the limit for the unpacked size.
 * `export IPTV_USER_AGENT="..."` (optional - the User-Agent sent when downloading; defaults to a browser-like one because many IPTV panels reset connections from `python-requests`)
 * `export IPTV_READ_TIMEOUT=300` (optional - seconds to wait for the provider to start/continue sending; raise it if your provider is slow to generate the playlist)
 * `export IPTV_SKIP_VOD=1` (optional - skip movie/series entries (Xtream-style `/movie/` and `/series/` URLs) when loading the M3U. Provider playlists that include a VOD library can be hundreds of MB and millions of entries; this keeps only live channels and greatly cuts memory use and load time)
@@ -91,7 +92,7 @@ The pages share one layout ([AdminLTE](https://github.com/ColorlibHQ/AdminLTE) /
 
 # How channels are matched to the guide (EPG)
 
-A ticked channel gets guide data when the `tvg-id` in the M3U is exactly the same as a channel `id` in the XMLTV file (case-sensitive; there is no matching on names). `/epg` only contains the channels and programmes of ticked channels, and this follows your selection immediately: ticking or unticking a channel, or saving groups, updates it right away (no need to wait for the hourly EPG refresh). Use the **EPG coverage** page to see which ticked channels have no match and why.
+A ticked channel gets guide data when the `tvg-id` in the M3U is exactly the same as a channel `id` in the XMLTV file (case-sensitive; there is no matching on names). Providers often differ from the EPG only in letter case (`npo1.nl` vs `NPO1.nl`); since players match exactly, the playlist served at `/m3u` then carries the EPG's spelling, and the guide for it is included. This is only done when the channel name fits the EPG channel (so a channel that wrongly carries another channel's id is left alone and listed on the coverage page). Set `IPTV_FIX_EPG_IDS=0` to switch the correction off. `/epg` only contains the channels and programmes of ticked channels, and this follows your selection immediately: ticking or unticking a channel, or saving groups, updates it right away (no need to wait for the hourly EPG refresh). Use the **EPG coverage** page to see which ticked channels have no match and why.
 
 # Logo cache
 

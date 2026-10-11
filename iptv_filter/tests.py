@@ -992,6 +992,53 @@ class EpgFlagSyncTests(EpgTestBase):
         self.assertEqual(EpgProgramme.objects.filter(included=True).count(), 15000)
 
 
+class EpgIdFixTests(EpgTestBase):
+    def test_names_agree(self):
+        a = epg_quality.names_agree
+        self.assertTrue(a('NL| NPO 1 HD', 'NPO1.nl'))
+        self.assertTrue(a('NL| RTL Z FHD', 'RTLZ.nl'))
+        self.assertTrue(a('NL| L1 LIMBURG HD', 'L1TV.nl'))
+        self.assertTrue(a('NL| OMROEP FRYSLAND HD', 'OmropFryslan.nl'))
+        self.assertTrue(a('NL| TV GELDERLAND FHD', 'TVGelderland.nl'))
+        self.assertFalse(a('NL| NPO 1 HD', 'NPO2.nl'))                 # number differs
+        self.assertFalse(a('NL| TV NOORD HD', 'RTVUtrecht.nl'))
+        self.assertFalse(a('NL| OMROEP BRABANT FHD', 'OmroepGelderland.nl'))
+        self.assertTrue(a('NL| EUROSPORT 1 HD', 'x.nl', 'Eurosport 1'))  # display name counts too
+
+    def test_m3u_uses_epg_spelling_and_epg_is_included(self):
+        self._pc('NL| NPO 1 HD', 'npo1.nl', included=True)
+        self._epg('NPO1.nl', programmes=2)
+        epg_quality.sync_flags()
+        body = Client().get('/m3u').content.decode()
+        self.assertIn('tvg-id="NPO1.nl"', body)
+        self.assertNotIn('tvg-id="npo1.nl"', body)
+        self.assertEqual(EpgProgramme.objects.filter(channel='NPO1.nl', included=True).count(), 2)
+        self.assertIn('<channel id="NPO1.nl">', Client().get('/epg').content.decode())
+
+    def test_conflicting_name_is_left_alone(self):
+        self._pc('NL| TV NOORD HD', 'rtvutrecht.nl', included=True)
+        self._epg('RTVUtrecht.nl', programmes=1)
+        epg_quality.sync_flags()
+        self.assertIn('tvg-id="rtvutrecht.nl"', Client().get('/m3u').content.decode())
+        self.assertEqual(EpgProgramme.objects.filter(included=True).count(), 0)
+        cov = epg_quality.coverage()
+        self.assertEqual((cov['matched'], cov['counts']['conflict']), (0, 1))
+        self.assertContains(Client().get('/coverage'), 'another channel')
+
+    def test_exact_match_wins_and_switch_off(self):
+        import os
+        from unittest import mock
+        self._pc('NL| NPO 1 HD', 'npo1.nl', included=True)
+        self._epg('NPO1.nl', programmes=1)
+        with mock.patch.dict(os.environ, {'IPTV_FIX_EPG_IDS': '0'}):
+            epg_quality.sync_flags()
+            self.assertIn('tvg-id="npo1.nl"', Client().get('/m3u').content.decode())
+            self.assertEqual(epg_quality.coverage()['counts']['case_only'], 1)
+        self._epg('npo1.nl', programmes=1)                              # exact id now exists
+        epg_quality.sync_flags()
+        self.assertIn('tvg-id="npo1.nl"', Client().get('/m3u').content.decode())
+
+
 class EpgCoverageTests(EpgTestBase):
     def test_categories(self):
         self._pc('Good', 'good.nl', included=True)
@@ -1005,9 +1052,9 @@ class EpgCoverageTests(EpgTestBase):
         self._epg('empty.nl', programmes=0)
         epg_quality.sync_flags()
         cov = epg_quality.coverage()
-        self.assertEqual((cov['ticked'], cov['matched'], cov['percent']), (5, 1, 20))
-        self.assertEqual(cov['counts'], {'no_id': 1, 'case_only': 1, 'missing': 1, 'empty': 1})
-        self.assertEqual(cov['problems']['case_only'][0]['epg_id'], 'case.nl')
+        self.assertEqual((cov['ticked'], cov['matched'], cov['percent']), (5, 2, 40))   # 'Case' is corrected automatically
+        self.assertEqual(cov['counts'], {'no_id': 1, 'case_only': 0, 'conflict': 0, 'missing': 1, 'empty': 1})
+        self.assertEqual(cov['fixed'][0]['epg_id'], 'case.nl')
         self.assertEqual(cov['problems']['missing'][0]['name'], 'Missing')
 
     def test_horizon_from_programmes_of_ticked_channels(self):
@@ -1033,3 +1080,106 @@ class EpgCoverageTests(EpgTestBase):
     def test_names_are_escaped(self):
         self._pc('<script>x</script>', 'm.nl', included=True)
         self.assertNotIn('<script>x</script>', Client().get('/coverage').content.decode())
+
+
+import gzip as _gzip
+
+
+class GzipRetrieveTests(TestCase):
+    """EPG sources often publish epg.xml.gz - the gzip is the file itself, not
+    HTTP Content-Encoding."""
+
+    XML = ('<?xml version="1.0" encoding="utf-8"?><tv>'
+           '<channel id="a.nl"><display-name>A</display-name></channel>'
+           '<programme start="20261011120000 +0200" stop="20261011130000 +0200" channel="a.nl"><title>Show é</title></programme>'
+           '</tv>').encode()
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        xml = cls.XML
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path.startswith('/epg.xml.gz'):          # gzip file, served as a binary download
+                    self._send(_gzip.compress(xml), 'application/gzip')
+                elif self.path.startswith('/epg-ce'):             # plain XML with Content-Encoding: gzip
+                    self._send(_gzip.compress(xml), 'application/xml', {'Content-Encoding': 'gzip'})
+                elif self.path.startswith('/plain'):
+                    self._send(xml, 'application/xml')
+                elif self.path.startswith('/truncated'):
+                    self._send(_gzip.compress(xml)[:-12], 'application/gzip')
+                elif self.path.startswith('/garbage'):
+                    self._send(b'\x1f\x8b' + b'not really gzip', 'application/gzip')
+                elif self.path.startswith('/bomb'):
+                    self._send(_gzip.compress(b'0' * (3 * 1024 * 1024)), 'application/gzip')
+                else:
+                    self._send(b'no', 'text/plain', code=404)
+
+            def _send(self, body, ctype, extra=None, code=200):
+                self.send_response(code)
+                self.send_header('Content-Type', ctype)
+                self.send_header('Content-Length', str(len(body)))
+                for k, v in (extra or {}).items():
+                    self.send_header(k, v)
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+
+        cls.server = HTTPServer(('127.0.0.1', 0), Handler)
+        cls.base = f'http://127.0.0.1:{cls.server.server_address[1]}'
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        super().tearDownClass()
+
+    def _fetch(self, path):
+        from iptv_filter import settings_store
+        settings_store.set_gui_url('epg', f'{self.base}{path}')
+        return iptv_updater._retrieve('epg')
+
+    def test_gzipped_file_is_unpacked_and_processed(self):
+        self.assertTrue(self._fetch('/epg.xml.gz'))
+        self.assertEqual(bytes(CachedFile.objects.get(file_type='epg').file), self.XML)
+        iptv_updater._update_tables('epg')
+        self.assertEqual(EpgChannel.objects.filter(channel_id='a.nl').count(), 1)
+        self.assertEqual(EpgProgramme.objects.get(channel='a.nl').title, 'Show é')
+
+    def test_http_content_encoding_gzip_still_works(self):
+        self.assertTrue(self._fetch('/epg-ce'))
+        self.assertEqual(bytes(CachedFile.objects.get(file_type='epg').file), self.XML)
+
+    def test_plain_xml_is_untouched(self):
+        self.assertTrue(self._fetch('/plain'))
+        self.assertEqual(bytes(CachedFile.objects.get(file_type='epg').file), self.XML)
+
+    def test_corrupt_or_truncated_gzip_is_a_warning_not_an_exception(self):
+        for path in ('/truncated', '/garbage'):
+            with self.assertLogs('iptv_updater.iptv_updater', level='WARNING'):
+                self.assertFalse(self._fetch(path), path)
+            self.assertIn('unpack', iptv_updater.get_last_error('epg')['message'])
+        self.assertFalse(CachedFile.objects.filter(file_type='epg').exists())  # nothing half-written
+
+    def test_decompression_bomb_is_refused(self):
+        with mock.patch.object(iptv_updater, 'MAX_UNPACKED_BYTES', 1024 * 1024):
+            with self.assertLogs('iptv_updater.iptv_updater', level='WARNING'):
+                self.assertFalse(self._fetch('/bomb'))
+        self.assertIn('larger than', iptv_updater.get_last_error('epg')['message'])
+
+    def test_gzip_also_works_for_the_playlist(self):
+        m3u = b'#EXTM3U\n#EXTINF:-1 tvg-name="A" group-title="G",A\nhttp://s/1\n'
+        data = _gzip.compress(m3u)
+        r = mock.Mock(content=data, status_code=200)
+        r.raise_for_status = lambda: None
+        from iptv_filter import settings_store
+        settings_store.set_gui_url('m3u', 'http://example.com/list.m3u.gz')
+        with mock.patch('requests.get', return_value=r):
+            self.assertTrue(iptv_updater._retrieve('m3u'))
+        self.assertEqual(bytes(CachedFile.objects.get(file_type='m3u').file), m3u)

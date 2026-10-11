@@ -4,8 +4,11 @@
 
 {% block content %}
 <p class="text-body-secondary">
-    A ticked channel gets guide data when its <code>tvg-id</code> in the playlist is exactly the same as a channel
-    <code>id</code> in the EPG file (case-sensitive). This page shows which ticked channels do not, and why.
+    A ticked channel gets guide data when its <code>tvg-id</code> is the same as a channel <code>id</code> in the EPG file.
+    Players compare exactly, so when your provider only differs in letter case
+    (<code>npo1.nl</code> vs <code>NPO1.nl</code>) the playlist this app serves carries the EPG's spelling
+    {% if not coverage.fix_enabled %}<strong>(this correction is switched off by <code>IPTV_FIX_EPG_IDS</code>)</strong>{% endif %}.
+    This page shows which ticked channels still get no guide, and why.
 </p>
 
 <div class="row">
@@ -54,11 +57,31 @@
 </div>
 {% endif %}
 
+{% if coverage.fixed_count %}
+<div class="card mb-4 card-success card-outline">
+    <div class="card-header"><h3 class="card-title">Id corrected automatically <span class="badge text-bg-success">{{ coverage.fixed_count }}</span></h3></div>
+    <div class="card-body p-0">
+        <div class="p-3 pb-0 small text-body-secondary">The provider's id differs from the EPG id only in letter case, and the channel name fits. The playlist served by this app uses the EPG's spelling, so these do get guide data.</div>
+        {% include "iptv_filter/_coverage_table.html" with rows=coverage.fixed show_epg=True %}
+    </div>
+</div>
+{% endif %}
+
+{% if coverage.counts.conflict %}
+<div class="card mb-4">
+    <div class="card-header"><h3 class="card-title">Id belongs to another channel? <span class="badge text-bg-danger">{{ coverage.counts.conflict }}</span></h3></div>
+    <div class="card-body p-0">
+        <div class="p-3 pb-0 small text-body-secondary">The id matches an EPG channel when case is ignored, but the channel name does not fit that EPG channel. Probably a provider mistake, so the id is left as it is and no guide is given.</div>
+        {% include "iptv_filter/_coverage_table.html" with rows=coverage.problems.conflict show_epg=True %}
+    </div>
+</div>
+{% endif %}
+
 {% if coverage.counts.case_only %}
 <div class="card mb-4">
     <div class="card-header"><h3 class="card-title">Differs only in letter case <span class="badge text-bg-warning">{{ coverage.counts.case_only }}</span></h3></div>
     <div class="card-body p-0">
-        <div class="p-3 pb-0 small text-body-secondary">The ids match when case is ignored, but the app (like many players) matches exactly, so these get no guide.</div>
+        <div class="p-3 pb-0 small text-body-secondary">The ids match when case is ignored, and the automatic correction is switched off, so these get no guide.</div>
         {% include "iptv_filter/_coverage_table.html" with rows=coverage.problems.case_only show_epg=True %}
     </div>
 </div>

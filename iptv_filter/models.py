@@ -49,10 +49,11 @@ class PlaylistChannel(models.Model):
     def __str__(self):
         return self.to_m3u()
 
-    def to_m3u(self, logo_override=None):
+    def to_m3u(self, logo_override=None, id_override=None):
         """The #EXTINF + URL lines for this channel. logo_override replaces the
-        stored logo URL (used to point at the local logo cache)."""
-        tvg_id = _m3u_safe(self.tvg_id)
+        stored logo URL (used to point at the local logo cache); id_override
+        replaces the tvg-id (letter-case correction towards the EPG)."""
+        tvg_id = _m3u_safe(self.tvg_id if id_override is None else id_override)
         tvg_name = _m3u_safe(self.tvg_name)
         tvg_logo = _m3u_safe(self.tvg_logo if logo_override is None else logo_override)
         group_title = _m3u_safe(self.group_title)

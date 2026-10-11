@@ -119,9 +119,16 @@ def m3u_api(request):
     lookup = logo_cache.cached_lookup() if logo_cache.enabled() else {}
     base = request.build_absolute_uri('/logo/')
 
+    try:
+        id_fix = epg_quality.id_overrides()[0]
+    except Exception:
+        logger.exception("Could not work out tvg-id corrections; serving the ids as given")
+        id_fix = {}
+
     parts = ["#EXTM3U\r\n"]
     for c in included_channels:
-        parts.append(c.to_m3u(logo_cache.local_logo_url(base, c.tvg_logo, lookup) if lookup else None))
+        parts.append(c.to_m3u(logo_cache.local_logo_url(base, c.tvg_logo, lookup) if lookup else None,
+                              id_fix.get(c.pk)))
         parts.append("\r\n")
     m3u = "".join(parts)
 

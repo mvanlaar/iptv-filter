@@ -3,6 +3,7 @@ import io
 import os
 import sys
 import threading
+import zlib
 import requests
 import re
 import time
@@ -10,7 +11,7 @@ from datetime import timedelta
 import xml.etree.ElementTree as ET
 from django.db import connection, transaction
 from django.utils import timezone
-from iptv_filter import settings_store, logo_cache
+from iptv_filter import settings_store, logo_cache, epg_quality
 from iptv_filter.models import AppConfig, CachedFile, PlaylistChannel, EpgChannel, EpgProgramme
 
 # import the logging library / Get an instance of a logger
@@ -147,6 +148,22 @@ READ_TIMEOUT = int(os.environ.get('IPTV_READ_TIMEOUT') or 300)
 
 _mask = settings_store.mask_url  # kept under this name for existing callers/tests
 
+MAX_UNPACKED_BYTES = int(os.environ.get('IPTV_MAX_UNPACKED_MB') or 1024) * 1024 * 1024
+
+def _gunzip(data):
+    """Unpack gzip data, refusing to expand beyond MAX_UNPACKED_BYTES (a tiny
+    file can otherwise decompress into gigabytes). Raises ValueError."""
+    d = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    try:
+        out = d.decompress(data, MAX_UNPACKED_BYTES + 1)
+        if len(out) > MAX_UNPACKED_BYTES:
+            raise ValueError(f"unpacked file is larger than {MAX_UNPACKED_BYTES // (1024*1024)} MB")
+        if not d.eof:
+            raise ValueError("gzip data is truncated")
+    except zlib.error as e:
+        raise ValueError(f"not valid gzip data: {e}")
+    return out
+
 # "m3u" and "epg" for now...
 def _retrieve(filetype):
     url, source = settings_store.get_url(filetype)
@@ -175,6 +192,18 @@ def _retrieve(filetype):
     # playlist can be hundreds of MB, and r.text would also run slow charset
     # detection or mis-decode when the server defaults to ISO-8859-1).
     data = r.content
+    # Many EPG sources publish a gzipped file (epg.xml.gz). That is the *file* being
+    # gzip, not HTTP Content-Encoding (which requests already undoes), so it has to be
+    # recognised by its content: gzip always starts with the bytes 1f 8b.
+    if data[:2] == b'\x1f\x8b':
+        packed = len(data)
+        try:
+            data = _gunzip(data)
+        except ValueError as e:
+            logger.warning(f"Failed to unpack gzipped {filetype} file from {safe_url}: {e}")
+            _record_error(filetype, f"Could not unpack gzip: {e}")
+            return False
+        logger.info(f"Unpacked gzipped {filetype} file: {packed} -> {len(data)} bytes")
     now = timezone.now()
     CachedFile.objects.update_or_create(file_type=filetype, defaults={'file':data, 'last_updated':now})
     logger.info(f"Received fresh {filetype} file, size {len(data)} in {time.monotonic()-started:.1f}s")
@@ -445,5 +474,10 @@ def _update_tables_impl(filetype):
             f"({len(to_create)} new, {len(to_update)} changed, {len(stale_keys)} removed, "
             f"{len(parsed_programmes)-len(to_create)-len(to_update)} unchanged)"
         )
+
+        # Channels whose playlist id differs from the EPG id only in letter case
+        # are served with the corrected id; make sure their guide is included.
+        fixed = epg_quality.sync_flags()
+        logging.info(f"EPG selection synced with the ticked channels ({fixed} rows flagged differently).")
 
     return True
