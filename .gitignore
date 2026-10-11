@@ -130,3 +130,5 @@ dmypy.json
 
 # VSCode Project
 .vscode/
+# locally cached channel logos
+logo_cache/
