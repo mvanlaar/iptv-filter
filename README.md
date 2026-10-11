@@ -71,6 +71,10 @@ Run the container: `docker-compose up`
 * `python manage.py migrate`
 * `SET IPTV_SAFE_START=`
 
+# Web interface
+
+The pages share one layout ([AdminLTE](https://github.com/ColorlibHQ/AdminLTE) / Bootstrap 5) with a sidebar, and a light / dark / auto theme switch in the top bar. All front-end libraries (AdminLTE, Bootstrap, Bootstrap Icons, ag-grid, axios) are bundled under `iptv_filter/static/vendor/` and served locally, so the UI works without internet access. Versions: AdminLTE 4.10.0, Bootstrap 5.3.8, Bootstrap Icons 1.13.2, ag-grid-community 36.1.0, axios 1.20.0.
+
 # Scheduled retrieval
 
 * When launched, the application will pull the latest m3u and epg files. Depending on your host this could take over 20 minutes.
@@ -83,6 +87,7 @@ Run the container: `docker-compose up`
 
 (Assuming you want to access this from the same box, you'll be using 'localhost' as the URL)
 The following are the common URLs to use:
+* http://localhost:8000/dashboard - overview: health, last fetch times, channel counts, any current error, and copy-ready URLs for your IPTV player.
 * http://localhost:8000/ - RUN THIS FIRST - This page allows you to adjust per-channel subscription. Changes are applied immediately.
 * http://localhost:8000/configure - set up the included groups whose channels you will be watching (Hit submit at the bottom of the page). Older interface but useful for managing entire groups at a time.
 * http://localhost:8000/m3u - the m3u file your IPTV player should point to

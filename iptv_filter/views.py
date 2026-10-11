@@ -3,9 +3,10 @@ import os
 import time
 import json
 import xml.etree.ElementTree as ET
-from django.shortcuts import render
+from django.shortcuts import render, redirect
 from django.http import HttpResponse, StreamingHttpResponse, FileResponse
 from django.db import OperationalError
+from django.views.decorators.csrf import ensure_csrf_cookie
 from django.db.models import Count
 from django.core import serializers
 from iptv_filter.models import PlaylistChannel, CachedFile, EpgChannel, EpgProgramme, AppConfig
@@ -84,6 +85,10 @@ def channel_api(request, id=-1):
         # TODO: Error class for consistent json responses?
         return HttpResponse(json.dumps({'result':'success'}))
 
+# The page's JavaScript posts channel toggles with an X-CSRFToken header read from
+# the csrftoken cookie; without this decorator that cookie is only ever set by
+# visiting /configure, so toggling a channel first would be rejected with a 403.
+@ensure_csrf_cookie
 def index(request):
     return render(request, 'iptv_filter/index.html')
 
@@ -160,7 +165,10 @@ def configure(request):
         for extra_gi in gi_to_remove:
             group_includes.remove(extra_gi)
 
-        return render(request, 'iptv_filter/select_groups.html', {'group_includes':group_includes})
+        return render(request, 'iptv_filter/select_groups.html', {
+            'group_includes': group_includes,
+            'saved': request.GET.get('saved'),
+        })
 
     elif request.method == 'POST':
         start_perftime = time.perf_counter()
@@ -181,10 +189,12 @@ def configure(request):
                 EpgChannel.objects.filter(channel_id=channel).update(included=True)
                 EpgProgramme.objects.filter(channel=channel).update(included=True)
 
-        return HttpResponse(f'Updated channels in {time.perf_counter()-start_perftime} seconds.')
+        # Post/Redirect/Get: back to the form with a confirmation instead of
+        # leaving the browser on a bare text response.
+        return redirect(f'/configure?saved={time.perf_counter()-start_perftime:.1f}')
 
 
-def status_api(request):
+def _status_payload():
     now = timezone.now()
 
     def file_status(filetype):
@@ -218,14 +228,41 @@ def status_api(request):
         epg_status['url_configured'] and epg_status['last_successful_fetch'] is not None
     )
 
-    payload = {
+    return {
         'version': __version__,
         'healthy': healthy,
         'server_time': now.isoformat(),
         'm3u': m3u_status,
         'epg': epg_status,
     }
-    return HttpResponse(json.dumps(payload, indent=2), content_type='application/json')
+
+def status_api(request):
+    return HttpResponse(json.dumps(_status_payload(), indent=2), content_type='application/json')
+
+def dashboard(request):
+    status = _status_payload()
+
+    def source(key, title, icon):
+        data = status[key]
+        last_error = iptv_updater.get_last_error(key)
+        cached = CachedFile.objects.filter(file_type=key).values('last_updated').first()
+        return {
+            'title': title, 'icon': icon, 'data': data,
+            'fetched': cached['last_updated'] if cached else None,
+            # last_error messages are already credential-masked by the updater.
+            'error': last_error,
+        }
+
+    output_urls = [
+        {'key': 'm3u', 'label': 'M3U playlist', 'url': request.build_absolute_uri('/m3u')},
+        {'key': 'epg', 'label': 'EPG guide (XMLTV)', 'url': request.build_absolute_uri('/epg')},
+    ]
+    return render(request, 'iptv_filter/dashboard.html', {
+        'status': status,
+        'sources': [source('m3u', 'Playlist (M3U)', 'bi-file-earmark-play'),
+                    source('epg', 'Guide (EPG)', 'bi-calendar3')],
+        'output_urls': output_urls,
+    })
 
 
 # ---------------------------------------------
