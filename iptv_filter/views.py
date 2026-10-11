@@ -3,6 +3,8 @@ import os
 import time
 import json
 import xml.etree.ElementTree as ET
+from django.contrib import messages
+from django.db.models.functions import Length
 from django.shortcuts import render, redirect
 from django.http import HttpResponse, StreamingHttpResponse, FileResponse
 from django.db import OperationalError
@@ -10,7 +12,7 @@ from django.views.decorators.csrf import ensure_csrf_cookie
 from django.db.models import Count
 from django.core import serializers
 from iptv_filter.models import PlaylistChannel, CachedFile, EpgChannel, EpgProgramme, AppConfig
-from iptv_filter import __version__
+from iptv_filter import __version__, settings_store
 from iptv_updater import iptv_updater
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
@@ -287,3 +289,81 @@ def _update_epg_tables(request):
     start_perftime = time.perf_counter()
     iptv_updater._update_tables('epg')
     return HttpResponse(f'Completed in {time.perf_counter()-start_perftime} seconds.')
+
+# ---------------------------------------------
+# Settings page: playlist/EPG URLs and the "skip movies/series" switch.
+
+def _settings_context():
+    sources = []
+    for ft, title, icon in (('m3u', 'Playlist (M3U)', 'bi-file-earmark-play'), ('epg', 'Guide (EPG, XMLTV)', 'bi-calendar3')):
+        url, source = settings_store.get_url(ft)
+        cached = CachedFile.objects.filter(file_type=ft).annotate(size=Length('file')).values('size', 'last_updated').first()
+        sources.append({
+            'key': ft, 'title': title, 'icon': icon,
+            'url': url or '', 'source': source,
+            'env_name': settings_store.env_name(ft),
+            'env_set': bool(os.environ.get(settings_store.env_name(ft))),
+            'busy': iptv_updater.is_busy(ft),
+            'cached': cached,
+        })
+    skip, skip_source = settings_store.get_skip_vod()
+    return {'sources': sources, 'skip_vod': skip, 'skip_vod_source': skip_source}
+
+def settings_page(request):
+    if request.method == 'POST':
+        action = request.POST.get('action', 'save')
+
+        # Validate everything first so a typo doesn't leave a half-saved form.
+        wanted = {}
+        errors = []
+        for ft in settings_store.FILETYPES:
+            value = (request.POST.get(f'{ft}_url') or '').strip()
+            if value:
+                err = settings_store.validate_url(value)
+                if err:
+                    errors.append(f'{ft.upper()} URL: {err}')
+            wanted[ft] = value
+        if errors:
+            for e in errors:
+                messages.error(request, e)
+            return redirect('/settings')
+
+        changed = []
+        for ft, value in wanted.items():
+            current, source = settings_store.get_url(ft)
+            if value and value != current:
+                settings_store.set_gui_url(ft, value)
+                changed.append(ft)
+            elif not value and source == settings_store.GUI:
+                settings_store.clear_gui_url(ft)
+                changed.append(ft)
+
+        skip_wanted = request.POST.get('skip_vod') == 'on'
+        skip_changed = skip_wanted != settings_store.get_skip_vod()[0]
+        if skip_changed:
+            settings_store.set_gui_skip_vod(skip_wanted)
+
+        if changed or skip_changed:
+            messages.success(request, 'Settings saved.')
+        else:
+            messages.info(request, 'Nothing changed.')
+
+        if action == 'fetch':
+            targets = changed or list(settings_store.FILETYPES)
+            started = [ft for ft in targets if iptv_updater.start_in_background(ft, download=True)]
+            busy = [ft for ft in targets if ft not in started]
+            if started:
+                messages.info(request, 'Downloading and processing ' + ' and '.join(t.upper() for t in started) +
+                              ' in the background - see the Dashboard for progress.')
+            if busy:
+                messages.warning(request, ' and '.join(t.upper() for t in busy) + ' is already being updated.')
+        elif action == 'reprocess':
+            if iptv_updater.start_in_background('m3u', download=False):
+                messages.info(request, 'Re-processing the stored playlist in the background (no download).')
+            else:
+                messages.warning(request, 'The playlist is already being updated.')
+        elif skip_changed:
+            messages.info(request, 'Click "Save & re-process playlist" to apply the movies/series setting to the stored playlist.')
+        return redirect('/settings')
+
+    return render(request, 'iptv_filter/settings.html', _settings_context())

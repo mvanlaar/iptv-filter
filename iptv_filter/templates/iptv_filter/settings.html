@@ -1,0 +1,104 @@
+{% extends "iptv_filter/base.html" %}
+{% block title %}Settings{% endblock %}
+{% block heading %}Settings{% endblock %}
+
+{% block content %}
+<form method="post" action="/settings">
+    {% csrf_token %}
+
+    <div class="row">
+        {% for src in sources %}
+        <div class="col-lg-6">
+            <div class="card mb-4">
+                <div class="card-header">
+                    <h3 class="card-title"><i class="bi {{ src.icon }} me-1"></i> {{ src.title }}</h3>
+                    <div class="card-tools">
+                        {% if src.source == 'gui' %}<span class="badge text-bg-primary">saved in the GUI</span>
+                        {% elif src.source == 'env' %}<span class="badge text-bg-secondary">from {{ src.env_name }}</span>
+                        {% elif src.source == 'stored' %}<span class="badge text-bg-secondary">stored value</span>
+                        {% else %}<span class="badge text-bg-warning">not set</span>{% endif %}
+                    </div>
+                </div>
+                <div class="card-body">
+                    <label class="form-label" for="{{ src.key }}_url">URL</label>
+                    <div class="input-group">
+                        <input type="password" class="form-control" id="{{ src.key }}_url" name="{{ src.key }}_url"
+                            value="{{ src.url }}" placeholder="https://&hellip;" autocomplete="off" spellcheck="false">
+                        <button class="btn btn-outline-secondary reveal-btn" type="button" data-target="{{ src.key }}_url" title="Show / hide">
+                            <i class="bi bi-eye"></i>
+                        </button>
+                    </div>
+                    <div class="form-text">
+                        Shown hidden because provider URLs usually contain your username and password.
+                        {% if src.source == 'gui' and src.env_set %}
+                        <br><i class="bi bi-info-circle"></i> The environment variable <code>{{ src.env_name }}</code> is set but ignored,
+                        because a URL is saved here. Clear the field and save to use the environment variable again.
+                        {% elif src.source == 'gui' %}
+                        <br>Clear the field and save to remove the saved URL.
+                        {% elif src.env_set %}
+                        <br>Currently coming from <code>{{ src.env_name }}</code>. Saving a different URL here takes precedence over it.
+                        {% endif %}
+                    </div>
+                    {% if src.cached %}
+                    <div class="mt-3 small text-body-secondary">
+                        Stored file: {{ src.cached.size|filesizeformat }}, fetched {{ src.cached.last_updated|date:"Y-m-d H:i" }}.
+                    </div>
+                    {% endif %}
+                    {% if src.busy %}
+                    <div class="mt-2"><span class="badge text-bg-info"><i class="bi bi-hourglass-split"></i> update running&hellip;</span></div>
+                    {% endif %}
+                    {% if src.key == 'm3u' %}
+                    <div class="alert alert-warning small mt-3 mb-0">
+                        Changing the playlist URL replaces the channel list. Ticked channels that are not in the new
+                        playlist are removed.
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+
+    <div class="card mb-4">
+        <div class="card-header">
+            <h3 class="card-title"><i class="bi bi-film me-1"></i> Movies &amp; series</h3>
+            <div class="card-tools">
+                {% if skip_vod_source == 'gui' %}<span class="badge text-bg-primary">saved in the GUI</span>
+                {% elif skip_vod_source == 'env' %}<span class="badge text-bg-secondary">from IPTV_SKIP_VOD</span>
+                {% else %}<span class="badge text-bg-secondary">default</span>{% endif %}
+            </div>
+        </div>
+        <div class="card-body">
+            <div class="form-check form-switch">
+                <input class="form-check-input" type="checkbox" role="switch" id="skip_vod" name="skip_vod" {% if skip_vod %}checked{% endif %}>
+                <label class="form-check-label" for="skip_vod">Skip movies and series when importing the playlist</label>
+            </div>
+            <div class="form-text">
+                Provider playlists that include a video-on-demand library can contain over a million entries.
+                Skipping them keeps the database small and the channel list usable. Channels you have already
+                ticked are always kept, so you can switch this off, tick a few movies or series, and switch it on again.
+                After changing this, use <em>Save &amp; re-process playlist</em>: it re-reads the stored playlist and does not download it again.
+            </div>
+        </div>
+    </div>
+
+    <div class="mb-4">
+        <button type="submit" name="action" value="save" class="btn btn-primary"><i class="bi bi-save me-1"></i> Save</button>
+        <button type="submit" name="action" value="fetch" class="btn btn-outline-primary"><i class="bi bi-cloud-download me-1"></i> Save &amp; fetch now</button>
+        <button type="submit" name="action" value="reprocess" class="btn btn-outline-primary"><i class="bi bi-arrow-repeat me-1"></i> Save &amp; re-process playlist</button>
+    </div>
+</form>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    document.querySelectorAll('.reveal-btn').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            var input = document.getElementById(btn.dataset.target);
+            var show = input.type === 'password';
+            input.type = show ? 'text' : 'password';
+            btn.innerHTML = '<i class="bi bi-eye' + (show ? '-slash' : '') + '"></i>';
+        });
+    });
+</script>
+{% endblock %}

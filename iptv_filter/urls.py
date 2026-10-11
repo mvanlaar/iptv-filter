@@ -8,6 +8,7 @@ urlpatterns = [
     path('favicon.ico', views.favicon, name='favicon'),
     path('m3u', views.m3u_api, name='m3u_api'),
     path('epg', views.epg_api, name='epg_api'),
+    path('settings', views.settings_page, name='settings'),
     path('configure', views.configure, name='configure'),
     path('channels', views.channel_api, name='channel_api'),
     path('channels/<int:id>', views.channel_api, name='channel_api_with_id'),

@@ -71,6 +71,20 @@ Run the container: `docker-compose up`
 * `python manage.py migrate`
 * `SET IPTV_SAFE_START=`
 
+# Configuration: web GUI vs. environment variables
+
+The M3U and EPG URLs (and the movies/series switch) can be set either with environment variables (`IPTV_M3U_URL`, `IPTV_EPG_URL`, `IPTV_SKIP_VOD`) or on the **Settings** page. **A value saved in the GUI always wins**; the environment variable is only used while nothing is saved there. Clear a URL field on the Settings page and save to go back to the environment variable.
+
+The container log says which one is in use at every start, for example:
+
+```
+Startup - M3U URL: using the value configured in the web GUI: http://host/get.php?username=***&password=*** (environment variable IPTV_M3U_URL is set but ignored - clear the URL on the Settings page to use it)
+Startup - EPG URL: nothing saved in the web GUI, using environment variable IPTV_EPG_URL: https://example.org/epg.xml
+Retrieving fresh m3u file from http://host/get.php?username=***&password=*** (configured in the web GUI)
+```
+
+Credentials in URLs are always masked in the log.
+
 # Web interface
 
 The pages share one layout ([AdminLTE](https://github.com/ColorlibHQ/AdminLTE) / Bootstrap 5) with a sidebar, and a light / dark / auto theme switch in the top bar. All front-end libraries (AdminLTE, Bootstrap, Bootstrap Icons, ag-grid, axios) are bundled under `iptv_filter/static/vendor/` and served locally, so the UI works without internet access. Versions: AdminLTE 4.10.0, Bootstrap 5.3.8, Bootstrap Icons 1.13.2, ag-grid-community 36.1.0, axios 1.20.0.
@@ -87,6 +101,7 @@ The pages share one layout ([AdminLTE](https://github.com/ColorlibHQ/AdminLTE) /
 
 (Assuming you want to access this from the same box, you'll be using 'localhost' as the URL)
 The following are the common URLs to use:
+* http://localhost:8000/settings - set the M3U and EPG URLs and the "skip movies/series" switch from the browser, and re-process the stored playlist without downloading it again.
 * http://localhost:8000/dashboard - overview: health, last fetch times, channel counts, any current error, and copy-ready URLs for your IPTV player.
 * http://localhost:8000/ - RUN THIS FIRST - This page allows you to adjust per-channel subscription. Changes are applied immediately.
 * http://localhost:8000/configure - set up the included groups whose channels you will be watching (Hit submit at the bottom of the page). Older interface but useful for managing entire groups at a time.

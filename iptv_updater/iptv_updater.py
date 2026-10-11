@@ -1,5 +1,7 @@
+import contextlib
 import io
 import os
+import threading
 import requests
 import re
 import time
@@ -7,6 +9,7 @@ from datetime import timedelta
 import xml.etree.ElementTree as ET
 from django.db import transaction
 from django.utils import timezone
+from iptv_filter import settings_store
 from iptv_filter.models import AppConfig, CachedFile, PlaylistChannel, EpgChannel, EpgProgramme
 
 # import the logging library / Get an instance of a logger
@@ -36,17 +39,63 @@ def update_all():
         logger.exception("Unhandled error during startup EPG update.")
         _record_error('epg', str(e))
 
+# Only one download/processing run per file type at a time: the startup run,
+# the scheduler and the Settings page buttons could otherwise overlap and
+# fight over the same tables.
+_busy = {}
+_busy_lock = threading.Lock()
+
+@contextlib.contextmanager
+def _exclusive(filetype):
+    with _busy_lock:
+        acquired = not _busy.get(filetype)
+        if acquired:
+            _busy[filetype] = True
+    try:
+        yield acquired
+    finally:
+        if acquired:
+            with _busy_lock:
+                _busy[filetype] = False
+
+def is_busy(filetype):
+    return bool(_busy.get(filetype))
+
+def _run(filetype, download):
+    with _exclusive(filetype) as ok:
+        if not ok:
+            logger.warning(f"A {filetype} update is already running - skipping this request.")
+            return
+        if download:
+            if _retrieve(filetype):
+                _update_tables(filetype)
+            else:
+                logger.warning(f"Skipping {filetype} table update because retrieval failed.")
+        else:
+            _update_tables(filetype)
+
 def update_m3u():
-    if _retrieve('m3u'):
-        _update_tables('m3u')
-    else:
-        logger.warning("Skipping m3u table update because retrieval failed.")
+    _run('m3u', download=True)
 
 def update_epg():
-    if _retrieve('epg'):
-        _update_tables('epg')
-    else:
-        logger.warning("Skipping epg table update because retrieval failed.")
+    _run('epg', download=True)
+
+def reprocess(filetype):
+    """Re-read the stored file with the current settings - no download."""
+    _run(filetype, download=False)
+
+def start_in_background(filetype, download):
+    """Run an update on a daemon thread; False if one is already running."""
+    if is_busy(filetype):
+        return False
+    def work():
+        try:
+            _run(filetype, download)
+        except Exception as e:
+            logger.exception(f"Unhandled error during manual {filetype} update.")
+            _record_error(filetype, _mask(e))
+    threading.Thread(target=work, name=f'iptv-manual-{filetype}', daemon=True).start()
+    return True
 
 def update_m3u_scheduled():
     # TODO: Assuming 4am, make configurable.
@@ -92,27 +141,18 @@ DEFAULT_USER_AGENT = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML,
 CONNECT_TIMEOUT = 10
 READ_TIMEOUT = int(os.environ.get('IPTV_READ_TIMEOUT') or 300)
 
-_url_userinfo = re.compile(r'(?i)(://)[^/@\s]*@')
-_url_secret_param = re.compile(r'(?i)([?&](?:password|pass|pwd|token|key|secret)=)[^&\s]*')
-_url_user_param = re.compile(r'(?i)([?&]username=)[^&\s]*')
-
-def _mask(text):
-    """Strip credentials (user:pass@host and ?username=/password=/token=) from
-    URLs so they don't end up in logs or the /status output."""
-    text = _url_userinfo.sub(r'\1***@', str(text))
-    text = _url_secret_param.sub(r'\1***', text)
-    return _url_user_param.sub(r'\1***', text)
+_mask = settings_store.mask_url  # kept under this name for existing callers/tests
 
 # "m3u" and "epg" for now...
 def _retrieve(filetype):
-    configs = AppConfig.objects.filter(key=filetype+"_url")
-    if not configs:
-        logger.warning(f"No {filetype} URL configured yet (set IPTV_{filetype.upper()}_URL or configure it) - skipping retrieval.")
+    url, source = settings_store.get_url(filetype)
+    if not url:
+        logger.warning(f"No {filetype} URL configured yet (set it on the Settings page or via IPTV_{filetype.upper()}_URL) - skipping retrieval.")
         return False
-    url = configs[0].value
     safe_url = _mask(url)
+    origin = {'gui': 'configured in the web GUI', 'env': 'from environment variable', 'stored': 'stored value'}[source]
 
-    logger.info(f"Retrieving fresh {filetype} file from {safe_url}")
+    logger.info(f"Retrieving fresh {filetype} file from {safe_url} ({origin})")
 
     headers = {'User-Agent': os.environ.get('IPTV_USER_AGENT') or DEFAULT_USER_AGENT}
     started = time.monotonic()
@@ -178,7 +218,10 @@ def _update_tables_impl(filetype):
         # (last one wins), which also protects bulk_create from the unique
         # constraint on tvg_name.
         parsed = {}
-        skip_vod = bool(os.environ.get('IPTV_SKIP_VOD'))
+        skip_vod, skip_source = settings_store.get_skip_vod()
+        # Channels already ticked are kept even if they're movies/series, so
+        # turning VOD on, ticking a few, and turning it off again keeps them.
+        keep_names = set(PlaylistChannel.objects.filter(included=True).values_list('tvg_name', flat=True)) if skip_vod else set()
         skipped_vod = 0
         pending_extinf = None  # Reset so a stray/duplicate URL line can't reuse a stale channel from a previous iteration.
         # Iterate the raw bytes line by line instead of decoding + splitlines():
@@ -207,7 +250,7 @@ def _update_tables_impl(filetype):
 
             else:
                 if urlpattern.match(line) and pending_extinf is not None:
-                    if skip_vod and SKIP_VOD_RE.match(line):
+                    if skip_vod and SKIP_VOD_RE.match(line) and pending_extinf['tvg_name'] not in keep_names:
                         skipped_vod += 1
                         pending_extinf = None
                         continue
@@ -261,7 +304,7 @@ def _update_tables_impl(filetype):
             with transaction.atomic():
                 PlaylistChannel.objects.bulk_update(to_update[i:i+WRITE_BATCH], ['tvg_id', 'tvg_logo', 'group_title', 'stream_url', 'last_updated'])
         if skipped_vod:
-            logger.info(f"Skipped {skipped_vod} movie/series entries (IPTV_SKIP_VOD is set).")
+            logger.info(f"Skipped {skipped_vod} movie/series entries (skip movies/series is ON, set via {skip_source}); channels you already ticked are kept.")
 
         logging.info(
             f"Done with Channels in {time.perf_counter()-start_perftime} seconds. "

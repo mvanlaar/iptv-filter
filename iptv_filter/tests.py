@@ -453,3 +453,182 @@ class UiTests(TestCase):
         self.assertTrue(r['Location'].startswith('/configure?saved='))
         self.assertTrue(PlaylistChannel.objects.get(tvg_name='A').included)
         self.assertIn('Groups saved', Client().get(r['Location']).content.decode())
+
+
+class SettingsPrecedenceTests(TestCase):
+    """GUI-saved settings win over environment variables, and the logs say
+    which one is in use."""
+
+    LOGGER = 'iptv_filter.settings_store'
+
+    def _env(self, **kw):
+        from unittest import mock
+        base = {'IPTV_M3U_URL': '', 'IPTV_EPG_URL': '', 'IPTV_SKIP_VOD': ''}
+        base.update(kw)
+        return mock.patch.dict('os.environ', base)
+
+    def _startup(self, **env):
+        from iptv_filter import settings_store
+        with self._env(**env), self.assertLogs(self.LOGGER, level='INFO') as cm:
+            settings_store.apply_at_startup()
+        return '\n'.join(cm.output)
+
+    def test_env_used_when_nothing_saved_in_gui(self):
+        from iptv_filter import settings_store
+        log = self._startup(IPTV_M3U_URL='http://p.example/get.php?username=u&password=SECRET')
+        self.assertIn('nothing saved in the web GUI, using environment variable IPTV_M3U_URL', log)
+        self.assertNotIn('SECRET', log)
+        self.assertEqual(settings_store.get_url('m3u')[1], 'env')
+
+    def test_gui_value_wins_and_log_says_so(self):
+        from iptv_filter import settings_store
+        with self._env():
+            settings_store.set_gui_url('m3u', 'http://gui.example/list.m3u')
+        log = self._startup(IPTV_M3U_URL='http://env.example/other.m3u')
+        self.assertIn('M3U URL: using the value configured in the web GUI', log)
+        self.assertIn('IPTV_M3U_URL is set but ignored', log)
+        self.assertEqual(settings_store.get_url('m3u'), ('http://gui.example/list.m3u', 'gui'))
+
+    def test_gui_value_survives_restart_without_env(self):
+        from iptv_filter import settings_store
+        settings_store.set_gui_url('epg', 'http://gui.example/epg.xml')
+        log = self._startup()
+        self.assertIn('EPG URL: using the value configured in the web GUI', log)
+        self.assertNotIn('ignored', log)
+
+    def test_changed_env_is_picked_up_and_rows_do_not_pile_up(self):
+        from iptv_filter import settings_store
+        self._startup(IPTV_M3U_URL='http://old.example/a.m3u')
+        self._startup(IPTV_M3U_URL='http://new.example/b.m3u')
+        self.assertEqual(settings_store.get_url('m3u')[0], 'http://new.example/b.m3u')
+        self.assertEqual(AppConfig.objects.filter(key='m3u_url').count(), 1)
+
+    def test_not_configured_is_logged_as_warning(self):
+        from iptv_filter import settings_store
+        with self._env(), self.assertLogs(self.LOGGER, level='WARNING') as cm:
+            settings_store.apply_at_startup()
+        self.assertIn('M3U URL: not configured', '\n'.join(cm.output))
+
+    def test_clearing_gui_value_falls_back_to_env(self):
+        from iptv_filter import settings_store
+        with self._env(IPTV_EPG_URL='http://env.example/epg.xml'):
+            settings_store.set_gui_url('epg', 'http://gui.example/epg.xml')
+            settings_store.clear_gui_url('epg')
+        self.assertEqual(settings_store.get_url('epg'), ('http://env.example/epg.xml', 'env'))
+
+    def test_clearing_gui_value_without_env_unsets(self):
+        from iptv_filter import settings_store
+        with self._env():
+            settings_store.set_gui_url('epg', 'http://gui.example/epg.xml')
+            settings_store.clear_gui_url('epg')
+        self.assertEqual(settings_store.get_url('epg'), (None, None))
+
+    def test_skip_vod_precedence(self):
+        from iptv_filter import settings_store
+        with self._env():
+            self.assertEqual(settings_store.get_skip_vod(), (False, 'default'))
+        with self._env(IPTV_SKIP_VOD='1'):
+            self.assertEqual(settings_store.get_skip_vod(), (True, 'env'))
+            settings_store.set_gui_skip_vod(False)  # GUI says off: wins over env
+            self.assertEqual(settings_store.get_skip_vod(), (False, 'gui'))
+
+    def test_retrieve_log_names_the_source(self):
+        from iptv_filter import settings_store
+        settings_store.set_gui_url('m3u', 'http://127.0.0.1:1/x.m3u?password=SECRET')
+        with self.assertLogs('iptv_updater.iptv_updater', level='INFO') as cm:
+            iptv_updater._retrieve('m3u')  # connection refused: only the log matters
+        out = '\n'.join(cm.output)
+        self.assertIn('(configured in the web GUI)', out)
+        self.assertNotIn('SECRET', out)
+
+
+class SettingsPageTests(TestCase):
+    def setUp(self):
+        from unittest import mock
+        p = mock.patch.dict('os.environ', {'IPTV_M3U_URL': '', 'IPTV_EPG_URL': '', 'IPTV_SKIP_VOD': ''})
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_page_renders(self):
+        r = Client().get('/settings')
+        self.assertEqual(r.status_code, 200)
+        self.assertContains(r, 'not set')
+        self.assertContains(r, 'app-sidebar')
+
+    def test_save_urls_marks_them_as_gui(self):
+        from iptv_filter import settings_store
+        r = Client().post('/settings', {'m3u_url': 'http://a.example/x.m3u', 'epg_url': 'https://b.example/e.xml', 'action': 'save'})
+        self.assertEqual(r.status_code, 302)
+        self.assertEqual(settings_store.get_url('m3u'), ('http://a.example/x.m3u', 'gui'))
+        self.assertEqual(settings_store.get_url('epg'), ('https://b.example/e.xml', 'gui'))
+        self.assertContains(Client().get('/settings'), 'saved in the GUI')
+
+    def test_invalid_url_saves_nothing(self):
+        from iptv_filter import settings_store
+        c = Client()
+        c.post('/settings', {'m3u_url': 'http://ok.example/x.m3u', 'epg_url': 'ftp://nope', 'action': 'save'})
+        self.assertEqual(settings_store.get_url('m3u'), (None, None))
+        self.assertContains(c.get('/settings'), 'Must be a full http')
+
+    def test_unchanged_env_value_is_not_turned_into_a_gui_value(self):
+        from unittest import mock
+        from iptv_filter import settings_store
+        with mock.patch.dict('os.environ', {'IPTV_M3U_URL': 'http://env.example/x.m3u'}):
+            settings_store.apply_at_startup()
+            Client().post('/settings', {'m3u_url': 'http://env.example/x.m3u', 'epg_url': '', 'action': 'save'})
+        self.assertEqual(settings_store.get_url('m3u')[1], 'env')
+
+    def test_blank_field_clears_gui_value(self):
+        from iptv_filter import settings_store
+        settings_store.set_gui_url('m3u', 'http://a.example/x.m3u')
+        Client().post('/settings', {'m3u_url': '', 'epg_url': '', 'action': 'save'})
+        self.assertEqual(settings_store.get_url('m3u'), (None, None))
+
+    def test_skip_vod_switch_saved(self):
+        from iptv_filter import settings_store
+        Client().post('/settings', {'m3u_url': '', 'epg_url': '', 'skip_vod': 'on', 'action': 'save'})
+        self.assertEqual(settings_store.get_skip_vod(), (True, 'gui'))
+        Client().post('/settings', {'m3u_url': '', 'epg_url': '', 'action': 'save'})
+        self.assertEqual(settings_store.get_skip_vod(), (False, 'gui'))
+
+    def test_fetch_only_downloads_changed_urls(self):
+        from unittest import mock
+        settings_store_url = 'http://a.example/x.m3u'
+        with mock.patch.object(iptv_updater, 'start_in_background', return_value=True) as m:
+            Client().post('/settings', {'m3u_url': settings_store_url, 'epg_url': '', 'action': 'fetch'})
+        m.assert_called_once_with('m3u', download=True)
+
+    def test_reprocess_does_not_download(self):
+        from unittest import mock
+        with mock.patch.object(iptv_updater, 'start_in_background', return_value=True) as m:
+            Client().post('/settings', {'m3u_url': '', 'epg_url': '', 'action': 'reprocess'})
+        m.assert_called_once_with('m3u', download=False)
+
+    def test_page_does_not_start_second_run_when_busy(self):
+        iptv_updater._busy['m3u'] = True
+        try:
+            self.assertFalse(iptv_updater.start_in_background('m3u', download=False))
+            with self.assertLogs('iptv_updater.iptv_updater', level='WARNING'):
+                iptv_updater.update_m3u()  # skipped, not run twice
+        finally:
+            iptv_updater._busy['m3u'] = False
+
+
+class SkipVodKeepsTickedTests(TestCase):
+    def test_ticked_vod_survives_skip_but_unticked_vod_goes(self):
+        from unittest import mock
+        m3u = ('#EXTM3U\n'
+               '#EXTINF:-1 tvg-name="Live" group-title="L",Live\nhttp://h/u/p/1\n'
+               '#EXTINF:-1 tvg-name="Movie A" group-title="M",A\nhttp://h/movie/u/p/1.mp4\n'
+               '#EXTINF:-1 tvg-name="Movie B" group-title="M",B\nhttp://h/movie/u/p/2.mp4\n')
+        _seed_cached_file('m3u', m3u)
+        with mock.patch.dict('os.environ', {'IPTV_SKIP_VOD': ''}):
+            iptv_updater._update_tables('m3u')  # everything imported
+            self.assertEqual(PlaylistChannel.objects.count(), 3)
+            PlaylistChannel.objects.filter(tvg_name='Movie A').update(included=True)
+            from iptv_filter import settings_store
+            settings_store.set_gui_skip_vod(True)
+            iptv_updater.reprocess('m3u')  # no download involved
+        names = set(PlaylistChannel.objects.values_list('tvg_name', flat=True))
+        self.assertEqual(names, {'Live', 'Movie A'})
+        self.assertTrue(PlaylistChannel.objects.get(tvg_name='Movie A').included)

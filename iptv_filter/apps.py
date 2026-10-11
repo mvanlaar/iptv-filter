@@ -23,18 +23,10 @@ class IptvFilterConfig(AppConfig):
         if safe_start:
             return
 
-        m3u_url = os.getenv('IPTV_M3U_URL')
-        epg_url = os.getenv('IPTV_EPG_URL')
-
-        if m3u_url:
-            logging.info("Startup - Setting M3U URL as per environment variable")
-            ac = AppConfigModel(key='m3u_url', value=m3u_url, last_updated=timezone.now())
-            ac.save()
-
-        if epg_url:
-            logging.info("Startup - Setting EPG URL as per environment variable")
-            ac = AppConfigModel(key='epg_url', value=epg_url, last_updated=timezone.now())
-            ac.save()
+        # Work out where each setting comes from (web GUI > environment variable)
+        # and log it. See iptv_filter/settings_store.py.
+        from . import settings_store
+        settings_store.apply_at_startup()
 
         # daemon=True so these threads never block the process from exiting
         # cleanly (e.g. on `docker stop`) - without it, Python won't exit
