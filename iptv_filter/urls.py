@@ -9,6 +9,7 @@ urlpatterns = [
     path('logo/<str:name>', views.logo_file, name='logo_file'),
     path('m3u', views.m3u_api, name='m3u_api'),
     path('epg', views.epg_api, name='epg_api'),
+    path('coverage', views.epg_coverage, name='coverage'),
     path('settings', views.settings_page, name='settings'),
     path('configure', views.configure, name='configure'),
     path('channels', views.channel_api, name='channel_api'),

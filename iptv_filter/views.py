@@ -12,7 +12,7 @@ from django.views.decorators.csrf import ensure_csrf_cookie
 from django.db.models import Count
 from django.core import serializers
 from iptv_filter.models import PlaylistChannel, CachedFile, EpgChannel, EpgProgramme, AppConfig, LogoCache
-from iptv_filter import __version__, settings_store, logo_cache
+from iptv_filter import __version__, settings_store, logo_cache, epg_quality
 from iptv_updater import iptv_updater
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
@@ -83,6 +83,11 @@ def channel_api(request, id=-1):
                 except (json.JSONDecodeError, KeyError) as e:
                     return HttpResponse(json.dumps({'result': 'error', 'message': f'Invalid request body: {e}'}), status=400, content_type='application/json')
                 ch.save()
+                try:
+                    # Guide data follows the selection immediately (not at the next hourly EPG refresh).
+                    epg_quality.sync_flags()
+                except OperationalError:
+                    logger.warning("Could not update EPG flags right now (database busy); the next EPG refresh will.")
                 logo_cache.request_sync()  # (debounced) cache the logo of a newly ticked channel
 
         # TODO: Error class for consistent json responses?
@@ -182,20 +187,16 @@ def configure(request):
         start_perftime = time.perf_counter()
 
         PlaylistChannel.objects.all().update(included=False)
-        EpgChannel.objects.all().update(included=False)
-        EpgProgramme.objects.all().update(included=False)
 
         for group_name in request.POST:
             if group_name == 'csrfmiddlewaretoken':
                 continue
 
             logger.info(f'About to include items for group "{group_name}"')
-            channels_by_group = PlaylistChannel.objects.filter(group_title=group_name)
-            channels_by_group.update(included=True)
+            PlaylistChannel.objects.filter(group_title=group_name).update(included=True)
 
-            for channel in list(set(channels_by_group.values_list('tvg_id', flat=True))):
-                EpgChannel.objects.filter(channel_id=channel).update(included=True)
-                EpgProgramme.objects.filter(channel=channel).update(included=True)
+        # One set-based update for the guide data instead of a few queries per channel.
+        epg_quality.sync_flags()
 
         logo_cache.request_sync()
 
@@ -274,6 +275,7 @@ def dashboard(request):
         'output_urls': output_urls,
         'logo_stats': logo_cache.stats(),
         'logo_enabled': logo_cache.enabled(),
+        'coverage': epg_quality.coverage(),
     })
 
 
@@ -416,3 +418,7 @@ def logo_file(request, name):
     response['X-Content-Type-Options'] = 'nosniff'
     response['Content-Security-Policy'] = "default-src 'none'; style-src 'unsafe-inline'; sandbox"
     return response
+
+
+def epg_coverage(request):
+    return render(request, 'iptv_filter/coverage.html', {'coverage': epg_quality.coverage()})

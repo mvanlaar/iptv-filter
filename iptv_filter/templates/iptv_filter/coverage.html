@@ -1,0 +1,86 @@
+{% extends "iptv_filter/base.html" %}
+{% block title %}EPG coverage{% endblock %}
+{% block heading %}EPG coverage{% endblock %}
+
+{% block content %}
+<p class="text-body-secondary">
+    A ticked channel gets guide data when its <code>tvg-id</code> in the playlist is exactly the same as a channel
+    <code>id</code> in the EPG file (case-sensitive). This page shows which ticked channels do not, and why.
+</p>
+
+<div class="row">
+    <div class="col-12 col-sm-6 col-lg-3">
+        <div class="info-box">
+            <span class="info-box-icon text-bg-{% if coverage.percent >= 80 %}success{% elif coverage.percent >= 40 %}warning{% else %}danger{% endif %} shadow-sm"><i class="bi bi-percent"></i></span>
+            <div class="info-box-content"><span class="info-box-text">With guide data</span>
+                <span class="info-box-number">{{ coverage.matched }} <small class="text-body-secondary">/ {{ coverage.ticked }} ({{ coverage.percent }}%)</small></span></div>
+        </div>
+    </div>
+    <div class="col-12 col-sm-6 col-lg-3">
+        <div class="info-box">
+            <span class="info-box-icon text-bg-secondary shadow-sm"><i class="bi bi-broadcast"></i></span>
+            <div class="info-box-content"><span class="info-box-text">Channels in the EPG file</span>
+                <span class="info-box-number">{{ coverage.epg_channels }}</span></div>
+        </div>
+    </div>
+    <div class="col-12 col-sm-6 col-lg-6">
+        <div class="info-box">
+            <span class="info-box-icon text-bg-info shadow-sm"><i class="bi bi-calendar-range"></i></span>
+            <div class="info-box-content"><span class="info-box-text">Guide window (ticked channels)</span>
+                <span class="info-box-number">
+                    {% if coverage.horizon %}{{ coverage.horizon.first|date:"Y-m-d H:i" }} &rarr; {{ coverage.horizon.last|date:"Y-m-d H:i" }}
+                    <small class="text-body-secondary">({{ coverage.horizon.hours_ahead }} h ahead)</small>
+                    {% else %}<span class="text-body-secondary">no programmes</span>{% endif %}
+                </span></div>
+        </div>
+    </div>
+</div>
+
+{% if not coverage.ticked %}
+<div class="alert alert-info">No channels are ticked yet. Tick channels on the Channels or Groups page first.</div>
+{% endif %}
+
+{% if coverage.truncated %}
+<div class="alert alert-warning">Long lists are cut off after {{ coverage.problems.no_id|length }} rows each.</div>
+{% endif %}
+
+{% if coverage.counts.missing %}
+<div class="card mb-4">
+    <div class="card-header"><h3 class="card-title">Id not in the EPG file <span class="badge text-bg-danger">{{ coverage.counts.missing }}</span></h3></div>
+    <div class="card-body p-0">
+        <div class="p-3 pb-0 small text-body-secondary">The channel has a <code>tvg-id</code>, but the EPG file has no channel with that id. Another EPG source may use these ids.</div>
+        {% include "iptv_filter/_coverage_table.html" with rows=coverage.problems.missing show_epg=False %}
+    </div>
+</div>
+{% endif %}
+
+{% if coverage.counts.case_only %}
+<div class="card mb-4">
+    <div class="card-header"><h3 class="card-title">Differs only in letter case <span class="badge text-bg-warning">{{ coverage.counts.case_only }}</span></h3></div>
+    <div class="card-body p-0">
+        <div class="p-3 pb-0 small text-body-secondary">The ids match when case is ignored, but the app (like many players) matches exactly, so these get no guide.</div>
+        {% include "iptv_filter/_coverage_table.html" with rows=coverage.problems.case_only show_epg=True %}
+    </div>
+</div>
+{% endif %}
+
+{% if coverage.counts.empty %}
+<div class="card mb-4">
+    <div class="card-header"><h3 class="card-title">In the EPG file, but no programmes <span class="badge text-bg-warning">{{ coverage.counts.empty }}</span></h3></div>
+    <div class="card-body p-0">
+        <div class="p-3 pb-0 small text-body-secondary">The id matches an EPG channel that currently lists no programmes.</div>
+        {% include "iptv_filter/_coverage_table.html" with rows=coverage.problems.empty show_epg=False %}
+    </div>
+</div>
+{% endif %}
+
+{% if coverage.counts.no_id %}
+<div class="card mb-4">
+    <div class="card-header"><h3 class="card-title">No <code>tvg-id</code> in the playlist <span class="badge text-bg-secondary">{{ coverage.counts.no_id }}</span></h3></div>
+    <div class="card-body p-0">
+        <div class="p-3 pb-0 small text-body-secondary">The provider gives these channels no id, so they cannot be matched automatically.</div>
+        {% include "iptv_filter/_coverage_table.html" with rows=coverage.problems.no_id show_epg=False %}
+    </div>
+</div>
+{% endif %}
+{% endblock %}

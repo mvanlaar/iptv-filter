@@ -76,6 +76,29 @@
 </div>
 
 <div class="card mb-4">
+    <div class="card-header">
+        <h3 class="card-title"><i class="bi bi-patch-check me-1"></i> EPG coverage</h3>
+        <div class="card-tools"><a href="/coverage" class="btn btn-sm btn-outline-secondary">Details</a></div>
+    </div>
+    <div class="card-body">
+        {% if coverage.ticked %}
+        <div class="progress mb-2" role="progressbar" aria-valuenow="{{ coverage.percent }}" aria-valuemin="0" aria-valuemax="100">
+            <div class="progress-bar {% if coverage.percent >= 80 %}bg-success{% elif coverage.percent >= 40 %}bg-warning{% else %}bg-danger{% endif %}" style="width: {{ coverage.percent }}%">{{ coverage.percent }}%</div>
+        </div>
+        <strong>{{ coverage.matched }}</strong> of <strong>{{ coverage.ticked }}</strong> ticked channels have guide data.
+        {% if coverage.counts.no_id or coverage.counts.missing or coverage.counts.case_only or coverage.counts.empty %}
+        <span class="text-body-secondary">Without:
+            {{ coverage.counts.no_id }} no id, {{ coverage.counts.missing }} id not in the guide,
+            {{ coverage.counts.case_only }} differ only in letter case, {{ coverage.counts.empty }} no programmes.</span>
+        {% endif %}
+        {% if coverage.horizon %}<div class="small text-body-secondary mt-1">Guide runs until {{ coverage.horizon.last|date:"Y-m-d H:i" }} ({{ coverage.horizon.hours_ahead }} h ahead).</div>{% endif %}
+        {% else %}
+        <span class="text-body-secondary">No channels ticked yet.</span>
+        {% endif %}
+    </div>
+</div>
+
+<div class="card mb-4">
     <div class="card-header"><h3 class="card-title"><i class="bi bi-image me-1"></i> Logo cache</h3></div>
     <div class="card-body">
         {% if logo_enabled %}

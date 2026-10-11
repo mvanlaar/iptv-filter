@@ -908,3 +908,128 @@ class LogoSafetyTests(TestCase):
                 logo_cache.sync()
             get.assert_not_called()
             self.assertIn('non-public', LogoCache.objects.get().last_error)
+
+
+from iptv_filter import epg_quality
+
+
+class EpgTestBase(TestCase):
+    def _pc(self, name, tvg_id, included=False, group='G'):
+        now = timezone.now()
+        return PlaylistChannel.objects.create(tvg_name=name, tvg_id=tvg_id, group_title=group, stream_url=f'http://s/{name}',
+                                              last_updated=now, first_seen=now, included=included)
+
+    def _epg(self, channel_id, programmes=1, included=None, start='20261011120000 +0200', stop='20261011130000 +0200'):
+        EpgChannel.objects.create(channel_id=channel_id, display_name=channel_id, included=included, last_updated=timezone.now())
+        for i in range(programmes):
+            EpgProgramme.objects.create(start=start, stop=stop, title=f'P{i}', channel=channel_id, included=included,
+                                        last_updated=timezone.now())
+
+
+
+class EpgFlagSyncTests(EpgTestBase):
+    def test_ticking_a_channel_updates_guide_flags_immediately(self):
+        ch = self._pc('A', 'a.nl')
+        self._epg('a.nl', programmes=3)
+        self._epg('b.nl', programmes=2)
+        r = Client().post(f'/channels/{ch.pk}', data=json.dumps({'included': True}), content_type='application/json')
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(EpgChannel.objects.get(channel_id='a.nl').included)
+        self.assertEqual(EpgProgramme.objects.filter(included=True).count(), 3)
+        self.assertFalse(EpgChannel.objects.get(channel_id='b.nl').included)
+
+    def test_unticking_removes_guide_data_again(self):
+        ch = self._pc('A', 'a.nl', included=True)
+        self._epg('a.nl', programmes=2, included=True)
+        Client().post(f'/channels/{ch.pk}', data=json.dumps({'included': False}), content_type='application/json')
+        self.assertFalse(EpgChannel.objects.get(channel_id='a.nl').included)
+        self.assertEqual(EpgProgramme.objects.filter(included=True).count(), 0)
+
+    def test_shared_tvg_id_stays_included_while_any_channel_is_ticked(self):
+        a = self._pc('A HD', 'a.nl', included=True)
+        self._pc('A SD', 'a.nl', included=True)
+        self._epg('a.nl', included=True)
+        a.included = False
+        a.save()
+        epg_quality.sync_flags()
+        self.assertTrue(EpgChannel.objects.get(channel_id='a.nl').included)
+
+    def test_empty_tvg_id_matches_nothing_and_null_flags_are_handled(self):
+        self._pc('NoId', '', included=True)
+        self._epg('x.nl', included=None)                      # NULL flag, not selected
+        epg_quality.sync_flags()
+        self.assertFalse(EpgChannel.objects.get(channel_id='x.nl').included)
+        self._pc('X', 'x.nl', included=True)
+        epg_quality.sync_flags()
+        self.assertTrue(EpgChannel.objects.get(channel_id='x.nl').included)
+
+    def test_sync_only_writes_rows_that_change(self):
+        self._pc('A', 'a.nl', included=True)
+        self._epg('a.nl', programmes=4)
+        self.assertEqual(epg_quality.sync_flags(), 5)         # 1 channel + 4 programmes
+        self.assertEqual(epg_quality.sync_flags(), 0)         # nothing left to do
+
+    def test_group_save_updates_guide_flags(self):
+        self._pc('A', 'a.nl', group='G1')
+        self._pc('B', 'b.nl', group='G2')
+        self._epg('a.nl')
+        self._epg('b.nl')
+        Client().post('/configure', {'G1': 'G1'})
+        self.assertTrue(EpgChannel.objects.get(channel_id='a.nl').included)
+        self.assertFalse(EpgChannel.objects.get(channel_id='b.nl').included)
+
+    def test_sync_is_fast_on_a_large_guide(self):
+        import time
+        for i in range(200):
+            self._pc(f'C{i}', f'id{i}', included=(i % 2 == 0))
+        EpgProgramme.objects.bulk_create([
+            EpgProgramme(start='20261011120000 +0200', stop='20261011130000 +0200', title='t', channel=f'id{i % 200}', last_updated=timezone.now())
+            for i in range(30000)])
+        EpgChannel.objects.bulk_create([EpgChannel(channel_id=f'id{i}', display_name='x', last_updated=timezone.now()) for i in range(200)])
+        t = time.time()
+        epg_quality.sync_flags()
+        self.assertLess(time.time() - t, 5)
+        self.assertEqual(EpgProgramme.objects.filter(included=True).count(), 15000)
+
+
+class EpgCoverageTests(EpgTestBase):
+    def test_categories(self):
+        self._pc('Good', 'good.nl', included=True)
+        self._pc('NoId', '', included=True)
+        self._pc('Missing', 'missing.nl', included=True)
+        self._pc('Case', 'case.NL', included=True)
+        self._pc('Empty', 'empty.nl', included=True)
+        self._pc('Unticked', 'nope.nl', included=False)
+        self._epg('good.nl', programmes=2)
+        self._epg('case.nl', programmes=1)
+        self._epg('empty.nl', programmes=0)
+        epg_quality.sync_flags()
+        cov = epg_quality.coverage()
+        self.assertEqual((cov['ticked'], cov['matched'], cov['percent']), (5, 1, 20))
+        self.assertEqual(cov['counts'], {'no_id': 1, 'case_only': 1, 'missing': 1, 'empty': 1})
+        self.assertEqual(cov['problems']['case_only'][0]['epg_id'], 'case.nl')
+        self.assertEqual(cov['problems']['missing'][0]['name'], 'Missing')
+
+    def test_horizon_from_programmes_of_ticked_channels(self):
+        self._pc('A', 'a.nl', included=True)
+        self._epg('a.nl', start='20990101120000 +0000', stop='20990101130000 +0000')
+        epg_quality.sync_flags()
+        h = epg_quality.coverage()['horizon']
+        self.assertEqual(h['last'].year, 2099)
+        self.assertGreater(h['hours_ahead'], 1000)
+
+    def test_empty_selection_does_not_crash(self):
+        cov = epg_quality.coverage()
+        self.assertEqual((cov['ticked'], cov['percent'], cov['horizon']), (0, 0, None))
+
+    def test_pages_render(self):
+        self._pc('Missing', 'missing.nl', included=True)
+        r = Client().get('/coverage')
+        self.assertContains(r, 'Id not in the EPG file')
+        self.assertContains(r, 'missing.nl')
+        self.assertContains(Client().get('/dashboard'), 'EPG coverage')
+        self.assertContains(Client().get('/coverage'), 'app-sidebar')
+
+    def test_names_are_escaped(self):
+        self._pc('<script>x</script>', 'm.nl', included=True)
+        self.assertNotIn('<script>x</script>', Client().get('/coverage').content.decode())

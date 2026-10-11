@@ -89,6 +89,10 @@ Credentials in URLs are always masked in the log.
 
 The pages share one layout ([AdminLTE](https://github.com/ColorlibHQ/AdminLTE) / Bootstrap 5) with a sidebar, and a light / dark / auto theme switch in the top bar. All front-end libraries (AdminLTE, Bootstrap, Bootstrap Icons, ag-grid, axios) are bundled under `iptv_filter/static/vendor/` and served locally, so the UI works without internet access. Versions: AdminLTE 4.10.0, Bootstrap 5.3.8, Bootstrap Icons 1.13.2, ag-grid-community 36.1.0, axios 1.20.0.
 
+# How channels are matched to the guide (EPG)
+
+A ticked channel gets guide data when the `tvg-id` in the M3U is exactly the same as a channel `id` in the XMLTV file (case-sensitive; there is no matching on names). `/epg` only contains the channels and programmes of ticked channels, and this follows your selection immediately: ticking or unticking a channel, or saving groups, updates it right away (no need to wait for the hourly EPG refresh). Use the **EPG coverage** page to see which ticked channels have no match and why.
+
 # Logo cache
 
 Players such as Kodi download every `tvg-logo` themselves from the provider's image host, which is slow on first load. This app can instead cache the logos **of the channels you have ticked** and serve them itself:
@@ -113,6 +117,7 @@ Environment variables (all optional): `IPTV_LOGO_CACHE=0` (disable by default), 
 
 (Assuming you want to access this from the same box, you'll be using 'localhost' as the URL)
 The following are the common URLs to use:
+* http://localhost:8000/coverage - EPG coverage: how many ticked channels actually get guide data, and for the others why not (no `tvg-id`, id not in the EPG file, differs only in letter case, or no programmes), plus how far ahead the guide runs.
 * http://localhost:8000/settings - set the M3U and EPG URLs and the "skip movies/series" switch from the browser, and re-process the stored playlist without downloading it again.
 * http://localhost:8000/dashboard - overview: health, last fetch times, channel counts, any current error, and copy-ready URLs for your IPTV player.
 * http://localhost:8000/ - RUN THIS FIRST - This page allows you to adjust per-channel subscription. Changes are applied immediately.
