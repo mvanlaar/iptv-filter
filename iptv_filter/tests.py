@@ -247,3 +247,90 @@ class ChannelApiTests(TestCase):
         self.assertEqual(resp.status_code, 200)
         ch.refresh_from_db()
         self.assertTrue(ch.included)
+
+
+class RetrieveTests(TestCase):
+    """_retrieve() against a local HTTP server. Many IPTV panels reset the
+    connection for the default python-requests User-Agent, so we must send a
+    browser-like one, and credentials in the URL must never reach logs/status."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        body = b'#EXTM3U\n#EXTINF:-1 tvg-name="A" group-title="G",A\nhttp://s/1\n'
+        cls.seen_agents = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                ua = self.headers.get('User-Agent', '')
+                cls.seen_agents.append(ua)
+                if ua.lower().startswith('python-requests'):
+                    self.connection.setsockopt(
+                        __import__('socket').SOL_SOCKET, __import__('socket').SO_LINGER,
+                        b'\x01\x00\x00\x00\x00\x00\x00\x00')
+                    self.connection.close()
+                    return
+                self.send_response(200)
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+
+        cls.server = HTTPServer(('127.0.0.1', 0), Handler)
+        cls.port = cls.server.server_address[1]
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        super().tearDownClass()
+
+    def _url(self):
+        return f'http://127.0.0.1:{self.port}/get.php?username=SECRETUSER&password=SECRETPASS&type=m3u_plus'
+
+    def test_sends_browser_user_agent_and_succeeds(self):
+        AppConfig.objects.update_or_create(key='m3u_url', defaults={'value': self._url()})
+        self.assertTrue(iptv_updater._retrieve('m3u'))
+        self.assertFalse(self.seen_agents[-1].lower().startswith('python-requests'))
+        self.assertIn(b'#EXTM3U', CachedFile.objects.get(file_type='m3u').file)
+
+    def test_custom_user_agent_env(self):
+        import os
+        from unittest import mock
+        AppConfig.objects.update_or_create(key='m3u_url', defaults={'value': self._url()})
+        with mock.patch.dict(os.environ, {'IPTV_USER_AGENT': 'MyAgent/1.0'}):
+            self.assertTrue(iptv_updater._retrieve('m3u'))
+        self.assertEqual(self.seen_agents[-1], 'MyAgent/1.0')
+
+    def test_failure_masks_credentials(self):
+        from unittest import mock
+        AppConfig.objects.update_or_create(key='m3u_url', defaults={'value': self._url()})
+        with mock.patch.dict('os.environ', {'IPTV_USER_AGENT': 'python-requests/2'}):
+            with self.assertLogs('iptv_updater.iptv_updater', level='WARNING') as cm:
+                self.assertFalse(iptv_updater._retrieve('m3u'))
+        logged = '\n'.join(cm.output)
+        self.assertNotIn('SECRETPASS', logged)
+        self.assertNotIn('SECRETUSER', logged)
+        err = iptv_updater.get_last_error('m3u')
+        self.assertIsNotNone(err)
+        self.assertNotIn('SECRETPASS', err['message'])
+
+    def test_mask_helper(self):
+        m = iptv_updater._mask
+        self.assertEqual(m('http://u:p@h/x'), 'http://***@h/x')
+        self.assertNotIn('abc', m('http://h/get.php?username=bob&password=abc&type=m3u'))
+        self.assertIn('type=m3u', m('http://h/get.php?username=bob&password=abc&type=m3u'))
+
+    def test_decode_without_charset_is_utf8(self):
+        class R:
+            encoding = None
+            content = 'Café'.encode()
+        self.assertEqual(iptv_updater._decode(R), 'Café')
+        R.content = 'Café'.encode('latin-1')
+        self.assertEqual(iptv_updater._decode(R), 'Café')
